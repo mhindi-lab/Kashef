@@ -1,0 +1,54 @@
+# Kashef — automatic daily product sync
+#
+# WHERE THIS GOES: save this file as .github/workflows/sync-products.yml
+# in your Kashef repo (create the .github/workflows/ folders if they
+# don't exist yet).
+#
+# WHAT IT DOES: once a day (and any time you trigger it manually), this
+# runs sync-products.mjs on GitHub's servers, which re-fetches all four
+# stores' live catalogs and regenerates synced-products.json. If prices,
+# stock, or sales changed, it commits the updated file straight to your
+# repo — so the live site (which auto-loads synced-products.json) stays
+# current with zero manual work after the first run.
+#
+# ONE-TIME SETUP (~10 seconds):
+#   1. Commit this file + sync-products.mjs to your repo.
+#   2. Go to the "Actions" tab on GitHub.
+#   3. Click "Sync Kashef products" in the left sidebar.
+#   4. Click "Run workflow" once to confirm it works.
+# After that, it just runs itself every day.
+
+name: Sync Kashef products
+
+on:
+  schedule:
+    # Runs once a day at 03:00 UTC (~05:00 Cairo time). Edit the cron
+    # expression to change the cadence, e.g. "0 */6 * * *" for every 6h.
+    - cron: "0 3 * * *"
+  workflow_dispatch: {} # lets you click "Run workflow" manually any time
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run product sync
+        run: node sync-products.mjs
+
+      - name: Commit updated catalog (if anything changed)
+        run: |
+          git config user.name "kashef-sync-bot"
+          git config user.email "actions@github.com"
+          git add synced-products.json
+          git diff --cached --quiet && echo "No product changes today." || git commit -m "chore: sync store products [automated]"
+          git push
