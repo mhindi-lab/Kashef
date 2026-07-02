@@ -28,6 +28,9 @@ const STORES = [
   { brand: "27", url: "https://twentysevenegy.myshopify.com" },
   { brand: "Locco", url: "https://loccoeg.com" },
   { brand: "Mavin", url: "https://www.mavin-wear.com" },
+  { brand: "Be-Indie", url: "https://be-indie.com" },
+  { brand: "TruCult", url: "https://trucult.co" },
+  { brand: "Marsy", url: "https://marsy.shop" },
 ];
 
 const OUTPUT_FILE = "synced-products.json";
