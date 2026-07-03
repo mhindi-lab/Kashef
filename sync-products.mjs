@@ -22,6 +22,7 @@
  */
 
 import { writeFile, readFile } from "node:fs/promises";
+import { pipeline } from "@xenova/transformers";
 
 const STORES = [
   { brand: "Mzaco", url: "https://mzaco-eg.com" },
@@ -63,6 +64,7 @@ const CATEGORIES = [
   { name: "Hair Care", icon: "hair", c1: "#0E6B62", c2: "#0A4F49" },
   { name: "Skin Care", icon: "skin", c1: "#CBB794", c2: "#A9946F" },
   { name: "Perfumes", icon: "perfume", c1: "#5B4B6A", c2: "#3E3350" },
+  { name: "Unisex", icon: "shirt", c1: "#6B7280", c2: "#4B5563" },
 ];
 
 function normalize(word) {
@@ -124,6 +126,74 @@ function guessCategoryFromText(text) {
   return CATEGORIES.find((c) => c.name === "Accessories") || CATEGORIES[0];
 }
 
+let _embedder = null;
+async function getEmbedder() {
+  if (!_embedder) {
+    _embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", { quantized: true });
+  }
+  return _embedder;
+}
+
+async function embedText(text) {
+  const embedder = await getEmbedder();
+  const output = await embedder(text, { pooling: "mean", normalize: true });
+  return Array.from(output.data).map((n) => Math.round(n * 10000) / 10000);
+}
+
+function cosineSim(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+  return s;
+}
+
+const CATEGORY_LABELS = {
+  "Women's Fashion": "women's clothing: dresses, skirts, blouses, gowns",
+  "Men's Fashion": "men's clothing: shirts, suits, formal wear",
+  "Unisex": "unisex clothing for anyone: hoodies, sweatshirts, sweatpants, t-shirts, jackets, crewnecks",
+  "Shoes": "shoes, sneakers, footwear",
+  "Bags": "bags, backpacks, totes, handbags",
+  "Accessories": "accessories: jewelry, rings, watches, belts, caps",
+  "Makeup": "makeup and cosmetics: lipstick, foundation",
+  "Hair Care": "hair care: shampoo, conditioner, styling products",
+  "Skin Care": "skin care: moisturizer, serum, cleanser",
+  "Perfumes": "perfumes, fragrances, cologne",
+};
+
+let _categoryEmbeddings = null;
+async function getCategoryEmbeddings() {
+  if (!_categoryEmbeddings) {
+    _categoryEmbeddings = {};
+    for (const [name, label] of Object.entries(CATEGORY_LABELS)) {
+      _categoryEmbeddings[name] = await embedText(label);
+    }
+  }
+  return _categoryEmbeddings;
+}
+
+async function classifyWithAI(text) {
+  const clean = (text || "").trim();
+  if (!clean) {
+    return { cat: CATEGORIES.find((c) => c.name === "Accessories") || CATEGORIES[0], emb: null };
+  }
+  const emb = await embedText(clean);
+  if (/\bunisex\b/i.test(clean)) {
+    const uni = CATEGORIES.find((c) => c.name === "Unisex");
+    return { cat: uni || CATEGORIES[0], emb };
+  }
+  const catEmbeddings = await getCategoryEmbeddings();
+  let best = null;
+  let bestSim = -1;
+  for (const [name, catEmb] of Object.entries(catEmbeddings)) {
+    const sim = cosineSim(emb, catEmb);
+    if (sim > bestSim) {
+      bestSim = sim;
+      best = name;
+    }
+  }
+  const cat = CATEGORIES.find((c) => c.name === best) || CATEGORIES[0];
+  return { cat, emb };
+}
+
 function stripHtml(html) {
   return (html || "")
     .replace(/<[^>]*>/g, " ")
@@ -156,8 +226,8 @@ async function fetchAllProducts(storeUrl) {
   return all;
 }
 
-function mapProduct(sp, storeUrl, brandName) {
-  const cat = guessCategoryFromText(
+async function mapProduct(sp, storeUrl, brandName) {
+  const { cat, emb } = await classifyWithAI(
     `${sp.product_type || ""} ${(sp.tags || []).join ? (sp.tags || []).join(" ") : sp.tags || ""} ${sp.title || ""}`
   );
   const variants = sp.variants || [];
@@ -175,6 +245,7 @@ function mapProduct(sp, storeUrl, brandName) {
     name: sp.title,
     brand: brandName || sp.vendor || "Unknown Brand",
     cat: cat.name,
+    emb: emb,
     price: `${Math.round(parseFloat(firstVariant.price || 0))} EGP`,
     icon: cat.icon,
     c1: cat.c1,
@@ -219,7 +290,7 @@ async function main() {
     const storeUrl = store.url.replace(/\/$/, "");
     try {
       const products = await fetchAllProducts(storeUrl);
-      const mapped = products.map((sp) => mapProduct(sp, storeUrl, store.brand));
+      const mapped = await Promise.all(products.map((sp) => mapProduct(sp, storeUrl, store.brand)));
       allMapped.push(...mapped);
       const inStockCount = mapped.filter((p) => p.inStock).length;
       summary.push(
