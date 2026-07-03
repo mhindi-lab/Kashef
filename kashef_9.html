@@ -17267,6 +17267,7 @@ function renderProducts(list){
   } else {
     empty.style.display = 'none';
     grid.innerHTML = list.map(productCard).join('');
+    grid.classList.add('in');
   }
 }
 
