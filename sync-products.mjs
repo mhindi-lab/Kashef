@@ -168,7 +168,8 @@ async function getCategoryEmbeddings() {
   return _categoryEmbeddings;
 }
 
-const KASHEF_WOMEN_ONLY_WORDS = ["dress","dresses","skirt","skirts","crop","gown","gowns","blouse","blouses","romper","rompers","jumpsuit","jumpsuits","bra","bralette","legging","leggings","abaya","abayas","hijab","hijabs","skort","skorts"];
+const KASHEF_WOMEN_ONLY_WORDS = ["skirt","skirts","crop","gown","gowns","blouse","blouses","romper","rompers","jumpsuit","jumpsuits","bra","bralette","legging","leggings","abaya","abayas","hijab","hijabs","skort","skorts"];
+const KASHEF_DRESS_EXCEPTION_RE = /\bdress(es)?\b(?!\s*(shirt|shirts|pant|pants|shoe|shoes|code|sock|socks|watch|watches))/;
 const KASHEF_NEUTRAL_WORDS = ["shirt","tee","tshirt","hoodie","sweatpants","sweatshirt","sweater","jacket","crewneck","short","shorts","pants","polo","cap","beanie","sock","socks","tracksuit","joggers"];
 
 async function classifyWithAI(text) {
@@ -180,7 +181,7 @@ async function classifyWithAI(text) {
   const lower = clean.toLowerCase().replace(/'s\b/g, "s");
   const words = lower.split(/[^a-z]+/).filter(Boolean);
   const wordSet = new Set(words);
-  if (KASHEF_WOMEN_ONLY_WORDS.some((w) => wordSet.has(w))) {
+  if (KASHEF_DRESS_EXCEPTION_RE.test(lower) || KASHEF_WOMEN_ONLY_WORDS.some((w) => wordSet.has(w))) {
     const women = CATEGORIES.find((c) => c.name === "Women's Fashion");
     return { cat: women || CATEGORIES[0], emb, unisex: false };
   }
