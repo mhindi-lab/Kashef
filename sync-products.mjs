@@ -51,7 +51,7 @@ const HTML_MARKER_END = "];\n/* END SYNCED_PRODUCTS */";
 // an Instagram profile picture, which can't be pulled programmatically.
 // Strip the stand-in so the site falls back to its honest colored-initials
 // badge instead of implying these are real logos.
-const BRANDS_WITHOUT_REAL_LOGOS = ["Mzaco", "27", "Be-Indie", "TruCult", "Marsy"];
+const BRANDS_WITHOUT_REAL_LOGOS = [];
 
 // Keep this in sync with the CATEGORIES array in kashef_9.html.
 const CATEGORIES = [
