@@ -627,6 +627,36 @@
   </div>
 </section>
 
+<style>
+.gg-card{cursor:pointer;border-radius:24px;overflow:hidden;position:relative;height:380px;display:flex;align-items:flex-end;padding:36px;transition:transform .35s cubic-bezier(.16,.84,.44,1);}
+.gg-card:hover{transform:translateY(-4px) scale(1.01);}
+</style>
+<section id="genderGate">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div>
+        <span class="eyebrow">Shop by</span>
+        <h2>Who are you shopping for?</h2>
+      </div>
+      <p>Pick a starting point — you can always refine with search, category, or brand filters after.</p>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:32px;">
+      <div class="gg-card" style="background:linear-gradient(135deg,#D8B4A0,#BE8E76);" onclick="selectCategoryFromCard('Women\'s Fashion')">
+        <div style="color:#fff;">
+          <div class="mono" style="font-size:12px;letter-spacing:.14em;text-transform:uppercase;opacity:.85;margin-bottom:8px;">Discover</div>
+          <div class="display" style="font-weight:800;font-size:34px;">Women</div>
+        </div>
+      </div>
+      <div class="gg-card" style="background:linear-gradient(135deg,#3B434C,#20262D);" onclick="selectCategoryFromCard('Men\'s Fashion')">
+        <div style="color:#fff;">
+          <div class="mono" style="font-size:12px;letter-spacing:.14em;text-transform:uppercase;opacity:.85;margin-bottom:8px;">Discover</div>
+          <div class="display" style="font-weight:800;font-size:34px;">Men</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section id="categories">
   <div class="wrap">
     <div class="sec-head reveal">
@@ -17600,9 +17630,14 @@ function mergeSyncedProducts(synced){
 if(mergeSyncedProducts(SYNCED_PRODUCTS)){
   console.log(`Kashef: loaded ${SYNCED_PRODUCTS.length} baked-in synced products.`);
 }
-renderCategories();
-renderBrands();
-applyFilters();
+function kashefInitialRender(){
+  try { renderCategories(); } catch(e){ console.error('Kashef renderCategories failed:', e); }
+  try { renderBrands(); } catch(e){ console.error('Kashef renderBrands failed:', e); }
+  try { applyFilters(); } catch(e){ console.error('Kashef applyFilters failed:', e); }
+}
+kashefInitialRender();
+document.addEventListener('DOMContentLoaded', kashefInitialRender);
+window.addEventListener('load', kashefInitialRender);
 
 async function loadSyncedProducts(){
   try{
