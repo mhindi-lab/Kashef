@@ -170,7 +170,16 @@ async function getCategoryEmbeddings() {
 
 const KASHEF_WOMEN_ONLY_WORDS = ["skirt","skirts","crop","gown","gowns","blouse","blouses","romper","rompers","jumpsuit","jumpsuits","bra","bralette","legging","leggings","abaya","abayas","hijab","hijabs","skort","skorts"];
 const KASHEF_DRESS_EXCEPTION_RE = /\bdress(es)?\b(?!\s*(shirt|shirts|pant|pants|shoe|shoes|code|sock|socks|watch|watches))/;
-const KASHEF_NEUTRAL_WORDS = ["shirt","tee","tshirt","hoodie","sweatpants","sweatshirt","sweater","jacket","crewneck","short","shorts","pants","polo","cap","beanie","sock","socks","tracksuit","joggers"];
+const KASHEF_CLOTHING_WORDS = ["shirt","shirts","tee","tees","tshirt","hoodie","hoodies","sweatpants","sweatshirt","sweatshirts","sweater","sweaters","jacket","jackets","crewneck","crewnecks","short","shorts","pant","pants","polo","polos","tracksuit","tracksuits","jogger","joggers","top","tops","blazer","blazers","coat","coats","vest","vests","cardigan","cardigans","sock","socks"];
+const KASHEF_SHOES_WORDS = ["shoe","shoes","sneaker","sneakers","boot","boots","sandal","sandals","slipper","slippers","slide","slides","footwear","heel","heels","flat","flats"];
+const KASHEF_BAGS_WORDS = ["bag","bags","backpack","backpacks","tote","totes","handbag","handbags","purse","purses","wallet","wallets","clutch","clutches"];
+const KASHEF_ACCESSORIES_WORDS = ["jewelry","jewellery","ring","rings","necklace","necklaces","bracelet","bracelets","earring","earrings","watch","watches","belt","belts","cap","caps","beanie","beanies","sunglasses","hat","hats"];
+const KASHEF_MAKEUP_WORDS = ["makeup","lipstick","lipsticks","foundation","mascara","eyeliner","blush","concealer","eyeshadow","lipgloss"];
+const KASHEF_HAIRCARE_WORDS = ["shampoo","conditioner","hairspray"];
+const KASHEF_SKINCARE_WORDS = ["moisturizer","cleanser","sunscreen","skincare","toner"];
+const KASHEF_PERFUME_WORDS = ["perfume","perfumes","cologne","fragrance","fragrances","parfum","edp","edt"];
+const KASHEF_WOMEN_SIGNAL = ["women","womens","woman","ladies","lady","girls","girl","female"];
+const KASHEF_MEN_SIGNAL = ["men","mens","man","guys","guy","boys","boy","male"];
 
 async function classifyWithAI(text) {
   const clean = (text || "").trim();
@@ -181,12 +190,35 @@ async function classifyWithAI(text) {
   const lower = clean.toLowerCase().replace(/'s\b/g, "s");
   const words = lower.split(/[^a-z]+/).filter(Boolean);
   const wordSet = new Set(words);
-  if (KASHEF_DRESS_EXCEPTION_RE.test(lower) || KASHEF_WOMEN_ONLY_WORDS.some((w) => wordSet.has(w))) {
+  const has = (arr) => arr.some((w) => wordSet.has(w));
+  const hasWomenSignal = has(KASHEF_WOMEN_SIGNAL);
+  const hasMenSignal = has(KASHEF_MEN_SIGNAL);
+
+  if (has(KASHEF_WOMEN_ONLY_WORDS) || KASHEF_DRESS_EXCEPTION_RE.test(lower)) {
     const women = CATEGORIES.find((c) => c.name === "Women's Fashion");
     return { cat: women || CATEGORIES[0], emb, unisex: false };
   }
-  const hasUnisexWord = wordSet.has("unisex");
-  const hasNeutralWord = KASHEF_NEUTRAL_WORDS.some((w) => wordSet.has(w));
+  if (has(KASHEF_CLOTHING_WORDS)) {
+    const catName = hasWomenSignal ? "Women's Fashion" : hasMenSignal ? "Men's Fashion" : "Men's Fashion";
+    const cat = CATEGORIES.find((c) => c.name === catName);
+    return { cat: cat || CATEGORIES[0], emb, unisex: wordSet.has("unisex") };
+  }
+  const directMatches = [
+    ["Shoes", KASHEF_SHOES_WORDS],
+    ["Bags", KASHEF_BAGS_WORDS],
+    ["Accessories", KASHEF_ACCESSORIES_WORDS],
+    ["Makeup", KASHEF_MAKEUP_WORDS],
+    ["Hair Care", KASHEF_HAIRCARE_WORDS],
+    ["Skin Care", KASHEF_SKINCARE_WORDS],
+    ["Perfumes", KASHEF_PERFUME_WORDS],
+  ];
+  for (const [name, list] of directMatches) {
+    if (has(list)) {
+      const cat = CATEGORIES.find((c) => c.name === name);
+      return { cat: cat || CATEGORIES[0], emb, unisex: false };
+    }
+  }
+
   const catEmbeddings = await getCategoryEmbeddings();
   let best = null;
   let bestSim = -1;
@@ -198,9 +230,7 @@ async function classifyWithAI(text) {
     }
   }
   const cat = CATEGORIES.find((c) => c.name === best) || CATEGORIES[0];
-  const isFashion = cat.name === "Men's Fashion" || cat.name === "Women's Fashion";
-  const unisex = isFashion && (hasUnisexWord || hasNeutralWord);
-  return { cat, emb, unisex };
+  return { cat, emb, unisex: false };
 }
 
 function stripHtml(html) {
