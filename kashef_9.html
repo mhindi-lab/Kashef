@@ -893,6 +893,7 @@ const CATEGORIES = [
   {name:"Hair Care", icon:"hair", c1:"#0E6B62", c2:"#0A4F49", photo:"https://images.pexels.com/photos/17576517/pexels-photo-17576517.jpeg?auto=compress&cs=tinysrgb&w=800&h=900&dpr=1"},
   {name:"Skin Care", icon:"skin", c1:"#CBB794", c2:"#A9946F", photo:"https://images.pexels.com/photos/13794471/pexels-photo-13794471.jpeg?auto=compress&cs=tinysrgb&w=800&h=900&dpr=1"},
   {name:"Perfumes", icon:"perfume", c1:"#5B4B6A", c2:"#3E3350", photo:"https://images.pexels.com/photos/3785784/pexels-photo-3785784.jpeg?auto=compress&cs=tinysrgb&w=800&h=900&dpr=1"},
+  {name:"Unisex", icon:"shirt", c1:"#6B7280", c2:"#4B5563", photo:"https://images.pexels.com/photos/4440567/pexels-photo-4440567.jpeg?auto=compress&cs=tinysrgb&w=800&h=900&dpr=1"},
 ];
 
 
@@ -17207,7 +17208,7 @@ function grad(c1,c2){ return `linear-gradient(135deg, ${c1}, ${c2})`; }
 function renderCategories(){
   const el = document.getElementById('catScroll');
   el.innerHTML = CATEGORIES.map(c => {
-    const count = PRODUCTS.filter(p => p.cat === c.name && p.inStock).length;
+    const count = PRODUCTS.filter(p => catMatches(p.cat, c.name) && p.inStock).length;
     const empty = count === 0;
     return `
     <div class="cat-card ${empty ? 'cat-empty' : ''}" onclick="selectCategoryFromCard('${c.name.replace(/'/g,"\\'")}')">
@@ -17554,7 +17555,7 @@ function applyFilters(){
   list = list.filter(p => p.inStock || filterState.brands.has(p.brand) || (qWords.length && queryMentionsBrand(qWords, p.brand)));
 
   if(max) list = list.filter(p => priceToNumber(p.price) <= max);
-  if(filterState.categories.size) list = list.filter(p => filterState.categories.has(p.cat));
+  if(filterState.categories.size) list = list.filter(p => [...filterState.categories].some(c => catMatches(p.cat, c)));
   if(filterState.brands.size) list = list.filter(p => filterState.brands.has(p.brand));
   if(filterState.sizes.size) list = list.filter(p => (p.sizes||[]).some(s => filterState.sizes.has(s)));
   if(filterState.colors.size) list = list.filter(p => filterState.colors.has(p.color));
@@ -17630,7 +17631,36 @@ function mergeSyncedProducts(synced){
 if(mergeSyncedProducts(SYNCED_PRODUCTS)){
   console.log(`Kashef: loaded ${SYNCED_PRODUCTS.length} baked-in synced products.`);
 }
+function catMatches(pCat, targetCat){
+  if(pCat === targetCat) return true;
+  if(pCat === 'Unisex' && (targetCat === "Men's Fashion" || targetCat === "Women's Fashion")) return true;
+  return false;
+}
+
+const KASHEF_NEUTRAL_WORDS = ['shirt','tee','tshirt','hoodie','sweatpants','sweatshirt','sweater','jacket','crewneck','short','shorts','pants','polo','cap','beanie','sock','socks','tracksuit','joggers'];
+const KASHEF_WOMEN_SIGNAL = ['women','womens','woman','ladies','lady','girls','girl','female'];
+const KASHEF_MEN_SIGNAL = ['men','mens','man','guys','guy','boys','boy','male'];
+
+function reclassifyUnisexProducts(){
+  PRODUCTS.forEach(p => {
+    if(p.cat !== "Men's Fashion" && p.cat !== "Women's Fashion") return;
+    const raw = `${p.name||''} ${p.desc||''}`.toLowerCase().replace(/'s\b/g, 's');
+    const words = raw.split(/[^a-z]+/).filter(Boolean);
+    const wordSet = new Set(words);
+    const hasUnisexWord = wordSet.has('unisex');
+    const hasNeutralWord = KASHEF_NEUTRAL_WORDS.some(w => wordSet.has(w));
+    if(!hasUnisexWord && !hasNeutralWord) return;
+    const hasWomenSignal = KASHEF_WOMEN_SIGNAL.some(w => wordSet.has(w));
+    const hasMenSignal = KASHEF_MEN_SIGNAL.some(w => wordSet.has(w));
+    if(hasUnisexWord || (!hasWomenSignal && !hasMenSignal)){
+      const uni = CATEGORIES.find(c => c.name === 'Unisex');
+      if(uni){ p.cat = uni.name; p.icon = uni.icon; p.c1 = uni.c1; p.c2 = uni.c2; }
+    }
+  });
+}
+
 function kashefInitialRender(){
+  try { reclassifyUnisexProducts(); } catch(e){ console.error('Kashef reclassifyUnisexProducts failed:', e); }
   try { renderCategories(); } catch(e){ console.error('Kashef renderCategories failed:', e); }
   try { renderBrands(); } catch(e){ console.error('Kashef renderBrands failed:', e); }
   try { applyFilters(); } catch(e){ console.error('Kashef applyFilters failed:', e); }
