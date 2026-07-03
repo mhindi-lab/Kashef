@@ -49,6 +49,6 @@ jobs:
         run: |
           git config user.name "kashef-sync-bot"
           git config user.email "actions@github.com"
-          git add synced-products.json
+          git add synced-products.json kashef_9.html
           git diff --cached --quiet && echo "No product changes today." || git commit -m "chore: sync store products [automated]"
           git push
