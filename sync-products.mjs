@@ -170,7 +170,8 @@ async function getCategoryEmbeddings() {
 
 const KASHEF_WOMEN_ONLY_WORDS = ["skirt","skirts","crop","gown","gowns","blouse","blouses","romper","rompers","jumpsuit","jumpsuits","bra","bralette","legging","leggings","abaya","abayas","hijab","hijabs","skort","skorts"];
 const KASHEF_DRESS_EXCEPTION_RE = /\bdress(es)?\b(?!\s*(shirt|shirts|pant|pants|shoe|shoes|code|sock|socks|watch|watches))/;
-const KASHEF_CLOTHING_WORDS = ["shirt","shirts","tee","tees","tshirt","hoodie","hoodies","sweatpants","sweatshirt","sweatshirts","sweater","sweaters","jacket","jackets","crewneck","crewnecks","short","shorts","pant","pants","polo","polos","tracksuit","tracksuits","jogger","joggers","top","tops","blazer","blazers","coat","coats","vest","vests","cardigan","cardigans","sock","socks"];
+const KASHEF_CLOTHING_WORDS = ["shirt","shirts","tee","tees","tshirt","hoodie","hoodies","sweatpants","sweatshirt","sweatshirts","sweater","sweaters","jacket","jackets","crewneck","crewnecks","short","shorts","pant","pants","jean","jeans","trouser","trousers","cargo","polo","polos","tracksuit","tracksuits","jogger","joggers","top","tops","blazer","blazers","coat","coats","vest","vests","cardigan","cardigans","sock","socks","henley"];
+const KASHEF_MEN_ONLY_RE = /\b(compression|muscle\s*(fit|tee|shirt)|cut\s*shirt)\b/;
 const KASHEF_SHOES_WORDS = ["shoe","shoes","sneaker","sneakers","boot","boots","sandal","sandals","slipper","slippers","slide","slides","footwear","heel","heels","flat","flats"];
 const KASHEF_BAGS_WORDS = ["bag","bags","backpack","backpacks","tote","totes","handbag","handbags","purse","purses","wallet","wallets","clutch","clutches"];
 const KASHEF_ACCESSORIES_WORDS = ["jewelry","jewellery","ring","rings","necklace","necklaces","bracelet","bracelets","earring","earrings","watch","watches","belt","belts","cap","caps","beanie","beanies","sunglasses","hat","hats"];
@@ -198,10 +199,21 @@ async function classifyWithAI(text) {
     const women = CATEGORIES.find((c) => c.name === "Women's Fashion");
     return { cat: women || CATEGORIES[0], emb, unisex: false };
   }
+  if (KASHEF_MEN_ONLY_RE.test(lower)) {
+    const men = CATEGORIES.find((c) => c.name === "Men's Fashion");
+    return { cat: men || CATEGORIES[0], emb, unisex: false };
+  }
   if (has(KASHEF_CLOTHING_WORDS)) {
-    const catName = hasWomenSignal ? "Women's Fashion" : hasMenSignal ? "Men's Fashion" : "Men's Fashion";
-    const cat = CATEGORIES.find((c) => c.name === catName);
-    return { cat: cat || CATEGORIES[0], emb, unisex: wordSet.has("unisex") };
+    if (hasWomenSignal) {
+      const women = CATEGORIES.find((c) => c.name === "Women's Fashion");
+      return { cat: women || CATEGORIES[0], emb, unisex: false };
+    }
+    if (hasMenSignal) {
+      const men = CATEGORIES.find((c) => c.name === "Men's Fashion");
+      return { cat: men || CATEGORIES[0], emb, unisex: false };
+    }
+    const men = CATEGORIES.find((c) => c.name === "Men's Fashion");
+    return { cat: men || CATEGORIES[0], emb, unisex: true };
   }
   const directMatches = [
     ["Shoes", KASHEF_SHOES_WORDS],
