@@ -209,10 +209,10 @@ async function fetchAllProducts(storeUrl) {
 // SAFETY: this NEVER overwrites p.image. It only sets a separate
 // p.cutoutImage field when the result passes quality checks. If
 // generation fails, times out, or the mask looks unreliable (too
-// small, too large, or full of gaps from something like a hand
-// resting on the garment), p.cutoutImage is simply left unset and
-// the site falls back to the original photo — see productCard()
-// and openProductModal() in kashef_9.html for the fallback logic.
+// small, too large, full of gaps, or too irregular a shape),
+// p.cutoutImage is simply left unset and the site falls back to the
+// original photo — see productCard() and openProductModal() in
+// kashef_9.html for the fallback logic.
 // ---------------------------------------------------------------
 
 const CUTOUT_DIR = "cutouts";
@@ -237,12 +237,17 @@ function imageSlug(imageUrl) {
 }
 
 // ---- Mask cleanup helpers ----
-// Real photos reviewed after the first live run showed two recurring
-// problems the raw segmentation mask doesn't catch on its own: (1) a
-// jagged, torn-paper-looking edge (worst on shorts/pants), and (2) small
-// gaps at the neckline where the mask misses a strip of real garment.
-// These three passes fix both, using nothing but the mask itself — no
-// extra model, still zero cost.
+// Real photos reviewed after the first two live test runs showed the raw
+// segmentation mask leaves gaps in two different ways: (1) small local
+// notches (a neckline gap where the model missed a strip of collar), which
+// a modest morphological closing fixes fine, and (2) longer structural gaps
+// (a strip of visible torso between a loose sleeve and the body, running
+// most of a side seam) that need a much bigger closing radius to bridge —
+// and even then may not close cleanly, since that's arguably a real gap in
+// the photo rather than a segmentation error. To cover both without
+// shipping a bad cutout, we (a) use a bigger closing radius than before,
+// then (b) measure how "solid" (convex) the resulting shape is and reject
+// anything still too irregular, falling back to the original photo.
 function largestComponent(bin, w, h) {
   const labels = new Int32Array(w * h).fill(-1);
   let bestLabel = -1;
@@ -307,12 +312,15 @@ function erode(src, w, h, r) {
   return out;
 }
 
-// Fill small gaps (like a neckline notch) without eating real edges.
+// Fill gaps (neckline notches, and longer side-seam strips) without eating
+// real edges too much.
 function closeSmallGaps(bin, w, h, r) {
   return erode(dilate(bin, w, h, r), w, h, r);
 }
 
-const CUTOUT_CLOSE_RADIUS = 8; // fills small internal gaps/notches
+const CUTOUT_CLOSE_RADIUS = 24; // fills gaps/notches, including longer structural
+                                 // strips (bumped up from an earlier 8 that only
+                                 // handled small local notches)
 const CUTOUT_SHAVE_RADIUS = 2; // trims a thin ring off the outer edge to remove
                                 // jagged/torn-looking boundaries and background bleed
 
@@ -324,6 +332,49 @@ function cleanupMask(mdata, mw, mh) {
   const shaved = erode(closed, mw, mh, CUTOUT_SHAVE_RADIUS);
   return shaved;
 }
+
+// Convex-hull area of a mask, computed on a subsampled point grid (fast and
+// close enough — we only need this for a solidity ratio, not exact geometry).
+function convexHullArea(mask, w, h) {
+  const pts = [];
+  const step = 2;
+  for (let y = 0; y < h; y += step) {
+    for (let x = 0; x < w; x += step) {
+      if (mask[y * w + x]) pts.push([x, y]);
+    }
+  }
+  if (pts.length < 3) return 0;
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+  let area = 0;
+  for (let i = 0; i < hull.length; i++) {
+    const [x1, y1] = hull[i];
+    const [x2, y2] = hull[(i + 1) % hull.length];
+    area += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(area) / 2;
+}
+
+// Reject masks whose shape is too far from convex (solidity = mask area /
+// hull area) — a well-formed ghost-mannequin garment silhouette should be
+// fairly solid; a low value usually means a long unclosed gap (like a
+// sleeve that never rejoins the torso) rather than a garment's natural
+// underarm curve. Configurable via env for easy tuning without a code
+// change, since the right cutoff is still being calibrated against real
+// photos.
+const CUTOUT_MIN_SOLIDITY = process.env.CUTOUT_MIN_SOLIDITY ? parseFloat(process.env.CUTOUT_MIN_SOLIDITY) : 0.72;
 
 async function loadCutoutCache() {
   try {
@@ -381,6 +432,14 @@ async function generateCutout(imageUrl) {
     const bboxArea = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
     const fillRatio = count / bboxArea;
     if (fillRatio < CUTOUT_MIN_FILL_RATIO) return null;
+
+    const hullArea = convexHullArea(cleanedBin, mw, mh);
+    const solidity = hullArea > 0 ? count / hullArea : 0;
+    console.log(`  Cutout candidate solidity=${solidity.toFixed(3)} fillRatio=${fillRatio.toFixed(3)} coverage=${coverage.toFixed(3)} for ${imageUrl}`);
+    if (solidity < CUTOUT_MIN_SOLIDITY) {
+      console.log(`  Rejected (solidity ${solidity.toFixed(3)} < ${CUTOUT_MIN_SOLIDITY}) — falling back to original photo`);
+      return null;
+    }
 
     const res = await fetch(imageUrl, { headers: { "User-Agent": "Mozilla/5.0 (Kashef sync bot)" } });
     if (!res.ok) return null;
