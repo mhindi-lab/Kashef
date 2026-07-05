@@ -12,17 +12,19 @@
  * the honest colored-initials badge.
  *
  * USAGE
- *   node sync-products.mjs
+ * node sync-products.mjs
  *
  * Requires Node 18+ (built-in fetch). To check your version:
- *   node -v
+ * node -v
  *
  * Edit the STORES list below to add/remove stores.
  * ---------------------------------------------------------------
  */
 
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile, readFile, mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { pipeline } from "@xenova/transformers";
+import sharp from "sharp";
 
 const STORES = [
   { brand: "Mzaco", url: "https://mzaco-eg.com" },
@@ -277,34 +279,50 @@ async function fetchAllProducts(storeUrl) {
   return all;
 }
 
-let _personDetector = null;
-async function getPersonDetector() {
-  if (!_personDetector) {
-    _personDetector = await pipeline("object-detection", "Xenova/yolos-tiny", { quantized: true });
+// ---------------------------------------------------------------
+// Garment cutout ("ghost mannequin" style): segments just the
+// clothing item out of a model photo and composites it on a plain
+// white background, so the product photo shows the garment itself
+// rather than the person wearing it. Runs entirely locally/free via
+// @xenova/transformers (Xenova/segformer_b0_clothes) — no paid API.
+//
+// SAFETY: this NEVER overwrites p.image. It only sets a separate
+// p.cutoutImage field when the result passes quality checks. If
+// generation fails, times out, or the mask looks unreliable (too
+// small, too large, or full of gaps from something like a hand
+// resting on the garment), p.cutoutImage is simply left unset and
+// the site falls back to the original photo — see productCard()
+// and openProductModal() in kashef_9.html for the fallback logic.
+// ---------------------------------------------------------------
+
+const CUTOUT_DIR = "cutouts";
+const CUTOUT_CANDIDATE_LABELS = ["Upper-clothes", "Dress", "Pants", "Skirt"];
+const CUTOUT_MIN_COVERAGE = 0.03; // mask must cover at least 3% of the image
+const CUTOUT_MAX_COVERAGE = 0.55; // ...and at most 55% (a bigger mask is probably wrong)
+const CUTOUT_MIN_FILL_RATIO = 0.68; // painted px / bounding-box area — catches big holes
+                                     // left by things like a hand resting on the garment
+const CUTOUT_LIMIT = process.env.CUTOUT_LIMIT ? parseInt(process.env.CUTOUT_LIMIT, 10) : Infinity;
+const CUTOUT_ELIGIBLE_CATS = new Set(["Men's Fashion", "Women's Fashion"]);
+
+let _segmenter = null;
+async function getSegmenter() {
+  if (!_segmenter) {
+    _segmenter = await pipeline("image-segmentation", "Xenova/segformer_b0_clothes", { quantized: true });
   }
-  return _personDetector;
+  return _segmenter;
 }
 
-async function runPersonDetection(imageUrl) {
-  if (!imageUrl) return false;
-  try {
-    const detector = await getPersonDetector();
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("person-detection timeout")), 8000));
-    const results = await Promise.race([detector(imageUrl, { threshold: 0.6 }), timeout]);
-    return results.some((r) => r.label === "person" && r.score >= 0.6);
-  } catch (err) {
-    console.warn("Person detection failed for", imageUrl, err && err.message);
-    return false;
-  }
+function imageSlug(imageUrl) {
+  return createHash("md5").update(imageUrl).digest("hex").slice(0, 16);
 }
 
-async function loadPersonCache() {
+async function loadCutoutCache() {
   try {
     const raw = await readFile(OUTPUT_FILE, "utf-8");
     const prev = JSON.parse(raw);
     const cache = new Map();
     for (const p of prev) {
-      if (p.image && typeof p.hasPerson === "boolean") cache.set(p.image, p.hasPerson);
+      if (p.image && p.cutoutImage) cache.set(p.image, p.cutoutImage);
     }
     return cache;
   } catch {
@@ -312,12 +330,90 @@ async function loadPersonCache() {
   }
 }
 
-async function detectHasPerson(imageUrl, cache) {
-  if (!imageUrl) return false;
-  if (cache.has(imageUrl)) return cache.get(imageUrl);
-  const result = await runPersonDetection(imageUrl);
-  cache.set(imageUrl, result);
-  return result;
+async function generateCutout(imageUrl) {
+  if (!imageUrl) return null;
+  try {
+    const segmenter = await getSegmenter();
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("cutout timeout")), 20000));
+    const output = await Promise.race([segmenter(imageUrl), timeout]);
+
+    // Try every candidate garment label and keep whichever plausible one
+    // covers the most of the image — the model doesn't always label the
+    // same photo the same way (e.g. some dresses come back as "Dress",
+    // others as "Upper-clothes"), so trust coverage over a fixed guess.
+    let best = null;
+    for (const label of CUTOUT_CANDIDATE_LABELS) {
+      const candidate = output.find((o) => o.label === label);
+      if (!candidate) continue;
+      const mdata = candidate.mask.data;
+      let count = 0;
+      for (let i = 0; i < mdata.length; i++) if (mdata[i] > 128) count++;
+      const coverage = count / mdata.length;
+      if (coverage < CUTOUT_MIN_COVERAGE || coverage > CUTOUT_MAX_COVERAGE) continue;
+      if (!best || coverage > best.coverage) best = { label, mask: candidate.mask, coverage, count };
+    }
+    if (!best) return null;
+
+    // Bounding-box fill ratio: a clean garment mask should be mostly solid
+    // within its own bounding box. A low ratio means something is punching
+    // a hole through the middle of it (classic case: a hand resting on the
+    // hip exposes background between the fingers) — skip those rather than
+    // ship a visibly broken cutout.
+    const { mask, count } = best;
+    const mw = mask.width, mh = mask.height, mdata = mask.data;
+    let minX = mw, maxX = 0, minY = mh, maxY = 0;
+    for (let y = 0; y < mh; y++) {
+      for (let x = 0; x < mw; x++) {
+        if (mdata[y * mw + x] > 128) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    const bboxArea = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
+    const fillRatio = count / bboxArea;
+    if (fillRatio < CUTOUT_MIN_FILL_RATIO) return null;
+
+    // Decode the original photo at the SAME resolution the model saw, so
+    // mask pixels map 1:1 onto source pixels with no remapping error.
+    const res = await fetch(imageUrl, { headers: { "User-Agent": "Mozilla/5.0 (Kashef sync bot)" } });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    const { data: srcRgba } = await sharp(buf)
+      .resize(mw, mh, { fit: "fill" })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const out = Buffer.alloc(mw * mh * 4);
+    for (let i = 0; i < mw * mh; i++) {
+      const si = i * 4;
+      if (mdata[i] > 128) {
+        out[si] = srcRgba[si];
+        out[si + 1] = srcRgba[si + 1];
+        out[si + 2] = srcRgba[si + 2];
+        out[si + 3] = 255;
+      } else {
+        out[si] = 255;
+        out[si + 1] = 255;
+        out[si + 2] = 255;
+        out[si + 3] = 255;
+      }
+    }
+
+    await mkdir(CUTOUT_DIR, { recursive: true });
+    const outPath = `${CUTOUT_DIR}/${imageSlug(imageUrl)}.jpg`;
+    await sharp(out, { raw: { width: mw, height: mh, channels: 4 } })
+      .jpeg({ quality: 88 })
+      .toFile(outPath);
+
+    return outPath;
+  } catch (err) {
+    console.warn("Cutout generation failed for", imageUrl, err && err.message);
+    return null;
+  }
 }
 
 async function mapProduct(sp, storeUrl, brandName) {
@@ -380,22 +476,42 @@ function stripPlaceholderLogos(html) {
 async function main() {
   const allMapped = [];
   const summary = [];
-  const personCache = await loadPersonCache();
+  const cutoutCache = await loadCutoutCache();
+  let cutoutBudget = CUTOUT_LIMIT;
+  let cutoutsGenerated = 0;
+  let cutoutsSkipped = 0;
+  let cutoutsReused = 0;
 
   for (const store of STORES) {
     const storeUrl = store.url.replace(/\/$/, "");
     try {
       const products = await fetchAllProducts(storeUrl);
       const mapped = await Promise.all(products.map((sp) => mapProduct(sp, storeUrl, store.brand)));
-            let _personProgress = 0;
+
+      let _cutoutProgress = 0;
       for (const p of mapped) {
-        p.hasPerson = false; // disabled: Xenova/yolos-tiny flagged 83% of product photos as containing a person (false positives), see commit history
-        _personProgress++;
-        if (_personProgress % 25 === 0 || _personProgress === mapped.length) {
-          console.log(`  Person-detection: ${_personProgress}/${mapped.length} for ${store.brand}`);
+        _cutoutProgress++;
+        if (CUTOUT_ELIGIBLE_CATS.has(p.cat) && p.image) {
+          if (cutoutCache.has(p.image)) {
+            p.cutoutImage = cutoutCache.get(p.image);
+            cutoutsReused++;
+          } else if (cutoutBudget > 0) {
+            const path = await generateCutout(p.image);
+            if (path) {
+              p.cutoutImage = path;
+              cutoutsGenerated++;
+            } else {
+              cutoutsSkipped++;
+            }
+            cutoutBudget--;
+          }
+        }
+        if (_cutoutProgress % 25 === 0 || _cutoutProgress === mapped.length) {
+          console.log(`  Cutouts: ${_cutoutProgress}/${mapped.length} for ${store.brand}`);
         }
       }
-allMapped.push(...mapped);
+
+      allMapped.push(...mapped);
       const inStockCount = mapped.filter((p) => p.inStock).length;
       summary.push(
         `${store.brand}: ${mapped.length} products (${inStockCount} in stock, ${
@@ -446,6 +562,9 @@ allMapped.push(...mapped);
   console.log("\n--- Kashef sync summary ---");
   summary.forEach((line) => console.log(line));
   console.log(`\nWrote ${deduped.length} total products to ${OUTPUT_FILE}`);
+  console.log(
+    `Cutouts — new: ${cutoutsGenerated}, reused from cache: ${cutoutsReused}, skipped (failed quality check): ${cutoutsSkipped}`
+  );
   if (bakedIntoHtml) {
     console.log(`Also baked ${deduped.length} products directly into ${HTML_FILE} — it now works standalone, no server needed.`);
   }
