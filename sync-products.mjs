@@ -277,6 +277,48 @@ async function fetchAllProducts(storeUrl) {
   return all;
 }
 
+let _personDetector = null;
+async function getPersonDetector() {
+  if (!_personDetector) {
+    _personDetector = await pipeline("object-detection", "Xenova/yolos-tiny", { quantized: true });
+  }
+  return _personDetector;
+}
+
+async function runPersonDetection(imageUrl) {
+  if (!imageUrl) return false;
+  try {
+    const detector = await getPersonDetector();
+    const results = await detector(imageUrl, { threshold: 0.6 });
+    return results.some((r) => r.label === "person" && r.score >= 0.6);
+  } catch (err) {
+    console.warn("Person detection failed for", imageUrl, err && err.message);
+    return false;
+  }
+}
+
+async function loadPersonCache() {
+  try {
+    const raw = await readFile(OUTPUT_FILE, "utf-8");
+    const prev = JSON.parse(raw);
+    const cache = new Map();
+    for (const p of prev) {
+      if (p.image && typeof p.hasPerson === "boolean") cache.set(p.image, p.hasPerson);
+    }
+    return cache;
+  } catch {
+    return new Map();
+  }
+}
+
+async function detectHasPerson(imageUrl, cache) {
+  if (!imageUrl) return false;
+  if (cache.has(imageUrl)) return cache.get(imageUrl);
+  const result = await runPersonDetection(imageUrl);
+  cache.set(imageUrl, result);
+  return result;
+}
+
 async function mapProduct(sp, storeUrl, brandName) {
   const { cat, emb, unisex } = await classifyWithAI(
     `${sp.product_type || ""} ${(sp.tags || []).join ? (sp.tags || []).join(" ") : sp.tags || ""} ${sp.title || ""}`
@@ -337,13 +379,17 @@ function stripPlaceholderLogos(html) {
 async function main() {
   const allMapped = [];
   const summary = [];
+  const personCache = await loadPersonCache();
 
   for (const store of STORES) {
     const storeUrl = store.url.replace(/\/$/, "");
     try {
       const products = await fetchAllProducts(storeUrl);
       const mapped = await Promise.all(products.map((sp) => mapProduct(sp, storeUrl, store.brand)));
-      allMapped.push(...mapped);
+            for (const p of mapped) {
+        p.hasPerson = await detectHasPerson(p.image, personCache);
+      }
+allMapped.push(...mapped);
       const inStockCount = mapped.filter((p) => p.inStock).length;
       summary.push(
         `${store.brand}: ${mapped.length} products (${inStockCount} in stock, ${
