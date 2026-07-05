@@ -289,7 +289,8 @@ async function runPersonDetection(imageUrl) {
   if (!imageUrl) return false;
   try {
     const detector = await getPersonDetector();
-    const results = await detector(imageUrl, { threshold: 0.6 });
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("person-detection timeout")), 8000));
+    const results = await Promise.race([detector(imageUrl, { threshold: 0.6 }), timeout]);
     return results.some((r) => r.label === "person" && r.score >= 0.6);
   } catch (err) {
     console.warn("Person detection failed for", imageUrl, err && err.message);
@@ -386,8 +387,13 @@ async function main() {
     try {
       const products = await fetchAllProducts(storeUrl);
       const mapped = await Promise.all(products.map((sp) => mapProduct(sp, storeUrl, store.brand)));
-            for (const p of mapped) {
+            let _personProgress = 0;
+      for (const p of mapped) {
         p.hasPerson = await detectHasPerson(p.image, personCache);
+        _personProgress++;
+        if (_personProgress % 25 === 0 || _personProgress === mapped.length) {
+          console.log(`  Person-detection: ${_personProgress}/${mapped.length} for ${store.brand}`);
+        }
       }
 allMapped.push(...mapped);
       const inStockCount = mapped.filter((p) => p.inStock).length;
