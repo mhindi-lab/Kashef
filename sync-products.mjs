@@ -389,7 +389,7 @@ async function main() {
       const mapped = await Promise.all(products.map((sp) => mapProduct(sp, storeUrl, store.brand)));
             let _personProgress = 0;
       for (const p of mapped) {
-        p.hasPerson = await detectHasPerson(p.image, personCache);
+        p.hasPerson = false; // disabled: Xenova/yolos-tiny flagged 83% of product photos as containing a person (false positives), see commit history
         _personProgress++;
         if (_personProgress % 25 === 0 || _personProgress === mapped.length) {
           console.log(`  Person-detection: ${_personProgress}/${mapped.length} for ${store.brand}`);
