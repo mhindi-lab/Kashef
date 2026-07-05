@@ -39,23 +39,12 @@ const STORES = [
 const OUTPUT_FILE = "synced-products.json";
 const PAGE_SIZE = 250; // Shopify's max per page
 
-// Also bake the same product list directly into the site's HTML, between
-// these markers, so opening the file works with zero setup — no server,
-// no fetch — not just when it happens to be hosted somewhere with
-// synced-products.json sitting next to it. See kashef_9.html for the
-// matching SYNCED_PRODUCTS block and how it's used on page load.
 const HTML_FILE = "kashef_9.html";
 const HTML_MARKER_START = "const SYNCED_PRODUCTS = [";
 const HTML_MARKER_END = "];\n/* END SYNCED_PRODUCTS */";
 
-// Brands whose BRANDS-array `photo` is currently a stand-in (a product shot
-// or banner), not an actual uploaded logo — their real logo only exists as
-// an Instagram profile picture, which can't be pulled programmatically.
-// Strip the stand-in so the site falls back to its honest colored-initials
-// badge instead of implying these are real logos.
 const BRANDS_WITHOUT_REAL_LOGOS = [];
 
-// Keep this in sync with the CATEGORIES array in kashef_9.html.
 const CATEGORIES = [
   { name: "Women's Fashion", icon: "dress", c1: "#D8B4A0", c2: "#BE8E76" },
   { name: "Men's Fashion", icon: "shirt", c1: "#3B434C", c2: "#20262D" },
@@ -73,65 +62,28 @@ function normalize(word) {
 }
 
 const KEYWORD_MAP = {
-  dress: "Women's Fashion",
-  skirt: "Women's Fashion",
-  blouse: "Women's Fashion",
-  shirt: "Men's Fashion",
-  tee: "Men's Fashion",
-  tshirt: "Men's Fashion",
-  hoodie: "Men's Fashion",
-  sweatpants: "Men's Fashion",
-  sweater: "Men's Fashion",
-  jacket: "Men's Fashion",
-  crewneck: "Men's Fashion",
-  short: "Men's Fashion",
-  shorts: "Men's Fashion",
-  pants: "Men's Fashion",
-  polo: "Men's Fashion",
-  shoe: "Shoes",
-  shoes: "Shoes",
-  sneaker: "Shoes",
-  sneakers: "Shoes",
-  bag: "Bags",
-  bags: "Bags",
-  backpack: "Bags",
-  ring: "Accessories",
-  cap: "Accessories",
-  hat: "Accessories",
-  belt: "Accessories",
-  jewelry: "Accessories",
-  makeup: "Makeup",
-  lipstick: "Makeup",
-  hair: "Hair Care",
-  skin: "Skin Care",
-  skincare: "Skin Care",
-  perfume: "Perfumes",
-  fragrance: "Perfumes",
+  dress: "Women's Fashion", skirt: "Women's Fashion", blouse: "Women's Fashion",
+  shirt: "Men's Fashion", tee: "Men's Fashion", tshirt: "Men's Fashion", hoodie: "Men's Fashion",
+  sweatpants: "Men's Fashion", sweater: "Men's Fashion", jacket: "Men's Fashion", crewneck: "Men's Fashion",
+  short: "Men's Fashion", shorts: "Men's Fashion", pants: "Men's Fashion", polo: "Men's Fashion",
+  shoe: "Shoes", shoes: "Shoes", sneaker: "Shoes", sneakers: "Shoes",
+  bag: "Bags", bags: "Bags", backpack: "Bags",
+  ring: "Accessories", cap: "Accessories", hat: "Accessories", belt: "Accessories", jewelry: "Accessories",
+  makeup: "Makeup", lipstick: "Makeup",
+  hair: "Hair Care", skin: "Skin Care", skincare: "Skin Care",
+  perfume: "Perfumes", fragrance: "Perfumes",
 };
 
 function guessCategoryFromText(text) {
-  const words = (text || "")
-    .toLowerCase()
-    .split(/[\s,/]+/)
-    .map(normalize)
-    .filter(Boolean);
-  for (const w of words) {
-    if (KEYWORD_MAP[w]) {
-      return CATEGORIES.find((c) => c.name === KEYWORD_MAP[w]);
-    }
-  }
-  for (const w of words) {
-    const match = CATEGORIES.find((c) => c.icon === w);
-    if (match) return match;
-  }
+  const words = (text || "").toLowerCase().split(/[\s,/]+/).map(normalize).filter(Boolean);
+  for (const w of words) { if (KEYWORD_MAP[w]) { return CATEGORIES.find((c) => c.name === KEYWORD_MAP[w]); } }
+  for (const w of words) { const match = CATEGORIES.find((c) => c.icon === w); if (match) return match; }
   return CATEGORIES.find((c) => c.name === "Accessories") || CATEGORIES[0];
 }
 
 let _embedder = null;
 async function getEmbedder() {
-  if (!_embedder) {
-    _embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", { quantized: true });
-  }
+  if (!_embedder) { _embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", { quantized: true }); }
   return _embedder;
 }
 
@@ -141,11 +93,7 @@ async function embedText(text) {
   return Array.from(output.data).map((n) => Math.round(n * 10000) / 10000);
 }
 
-function cosineSim(a, b) {
-  let s = 0;
-  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
-  return s;
-}
+function cosineSim(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
 
 const CATEGORY_LABELS = {
   "Women's Fashion": "women's clothing: dresses, skirts, blouses, gowns",
@@ -163,9 +111,7 @@ let _categoryEmbeddings = null;
 async function getCategoryEmbeddings() {
   if (!_categoryEmbeddings) {
     _categoryEmbeddings = {};
-    for (const [name, label] of Object.entries(CATEGORY_LABELS)) {
-      _categoryEmbeddings[name] = await embedText(label);
-    }
+    for (const [name, label] of Object.entries(CATEGORY_LABELS)) { _categoryEmbeddings[name] = await embedText(label); }
   }
   return _categoryEmbeddings;
 }
@@ -186,9 +132,7 @@ const KASHEF_MEN_SIGNAL = ["men","mens","man","guys","guy","boys","boy","male"];
 
 async function classifyWithAI(text) {
   const clean = (text || "").trim();
-  if (!clean) {
-    return { cat: CATEGORIES.find((c) => c.name === "Accessories") || CATEGORIES[0], emb: null, unisex: false };
-  }
+  if (!clean) { return { cat: CATEGORIES.find((c) => c.name === "Accessories") || CATEGORIES[0], emb: null, unisex: false }; }
   const emb = await embedText(clean);
   const lower = clean.toLowerCase().replace(/'s\b/g, "s");
   const words = lower.split(/[^a-z]+/).filter(Boolean);
@@ -206,31 +150,18 @@ async function classifyWithAI(text) {
     return { cat: men || CATEGORIES[0], emb, unisex: false };
   }
   if (has(KASHEF_CLOTHING_WORDS)) {
-    if (hasWomenSignal) {
-      const women = CATEGORIES.find((c) => c.name === "Women's Fashion");
-      return { cat: women || CATEGORIES[0], emb, unisex: false };
-    }
-    if (hasMenSignal) {
-      const men = CATEGORIES.find((c) => c.name === "Men's Fashion");
-      return { cat: men || CATEGORIES[0], emb, unisex: false };
-    }
+    if (hasWomenSignal) { const women = CATEGORIES.find((c) => c.name === "Women's Fashion"); return { cat: women || CATEGORIES[0], emb, unisex: false }; }
+    if (hasMenSignal) { const men = CATEGORIES.find((c) => c.name === "Men's Fashion"); return { cat: men || CATEGORIES[0], emb, unisex: false }; }
     const men = CATEGORIES.find((c) => c.name === "Men's Fashion");
     return { cat: men || CATEGORIES[0], emb, unisex: true };
   }
   const directMatches = [
-    ["Shoes", KASHEF_SHOES_WORDS],
-    ["Bags", KASHEF_BAGS_WORDS],
-    ["Accessories", KASHEF_ACCESSORIES_WORDS],
-    ["Makeup", KASHEF_MAKEUP_WORDS],
-    ["Hair Care", KASHEF_HAIRCARE_WORDS],
-    ["Skin Care", KASHEF_SKINCARE_WORDS],
+    ["Shoes", KASHEF_SHOES_WORDS], ["Bags", KASHEF_BAGS_WORDS], ["Accessories", KASHEF_ACCESSORIES_WORDS],
+    ["Makeup", KASHEF_MAKEUP_WORDS], ["Hair Care", KASHEF_HAIRCARE_WORDS], ["Skin Care", KASHEF_SKINCARE_WORDS],
     ["Perfumes", KASHEF_PERFUME_WORDS],
   ];
   for (const [name, list] of directMatches) {
-    if (has(list)) {
-      const cat = CATEGORIES.find((c) => c.name === name);
-      return { cat: cat || CATEGORIES[0], emb, unisex: false };
-    }
+    if (has(list)) { const cat = CATEGORIES.find((c) => c.name === name); return { cat: cat || CATEGORIES[0], emb, unisex: false }; }
   }
 
   const catEmbeddings = await getCategoryEmbeddings();
@@ -238,20 +169,14 @@ async function classifyWithAI(text) {
   let bestSim = -1;
   for (const [name, catEmb] of Object.entries(catEmbeddings)) {
     const sim = cosineSim(emb, catEmb);
-    if (sim > bestSim) {
-      bestSim = sim;
-      best = name;
-    }
+    if (sim > bestSim) { bestSim = sim; best = name; }
   }
   const cat = CATEGORIES.find((c) => c.name === best) || CATEGORIES[0];
   return { cat, emb, unisex: false };
 }
 
 function stripHtml(html) {
-  return (html || "")
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return (html || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 async function fetchAllProducts(storeUrl) {
@@ -262,12 +187,7 @@ async function fetchAllProducts(storeUrl) {
       `${storeUrl}/products.json?limit=${PAGE_SIZE}&page=${page}`,
       { headers: { "User-Agent": "Mozilla/5.0 (Kashef sync bot)" } }
     );
-    if (!res.ok) {
-      if (page === 1) {
-        throw new Error(`${storeUrl} responded with ${res.status}`);
-      }
-      break;
-    }
+    if (!res.ok) { if (page === 1) { throw new Error(`${storeUrl} responded with ${res.status}`); } break; }
     const data = await res.json();
     const products = data.products || [];
     if (!products.length) break;
@@ -316,6 +236,95 @@ function imageSlug(imageUrl) {
   return createHash("md5").update(imageUrl).digest("hex").slice(0, 16);
 }
 
+// ---- Mask cleanup helpers ----
+// Real photos reviewed after the first live run showed two recurring
+// problems the raw segmentation mask doesn't catch on its own: (1) a
+// jagged, torn-paper-looking edge (worst on shorts/pants), and (2) small
+// gaps at the neckline where the mask misses a strip of real garment.
+// These three passes fix both, using nothing but the mask itself — no
+// extra model, still zero cost.
+function largestComponent(bin, w, h) {
+  const labels = new Int32Array(w * h).fill(-1);
+  let bestLabel = -1;
+  let bestSize = 0;
+  let label = 0;
+  const stack = [];
+  for (let start = 0; start < w * h; start++) {
+    if (!bin[start] || labels[start] !== -1) continue;
+    let size = 0;
+    stack.length = 0;
+    stack.push(start);
+    labels[start] = label;
+    while (stack.length) {
+      const idx = stack.pop();
+      size++;
+      const x = idx % w;
+      const y = (idx / w) | 0;
+      if (x > 0 && bin[idx - 1] && labels[idx - 1] === -1) { labels[idx - 1] = label; stack.push(idx - 1); }
+      if (x < w - 1 && bin[idx + 1] && labels[idx + 1] === -1) { labels[idx + 1] = label; stack.push(idx + 1); }
+      if (y > 0 && bin[idx - w] && labels[idx - w] === -1) { labels[idx - w] = label; stack.push(idx - w); }
+      if (y < h - 1 && bin[idx + w] && labels[idx + w] === -1) { labels[idx + w] = label; stack.push(idx + w); }
+    }
+    if (size > bestSize) { bestSize = size; bestLabel = label; }
+    label++;
+  }
+  const out = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) out[i] = labels[i] === bestLabel ? 1 : 0;
+  return out;
+}
+
+function dilate(src, w, h, r) {
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let v = 0;
+      for (let dy = -r; dy <= r && !v; dy++) {
+        for (let dx = -r; dx <= r && !v; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx >= 0 && nx < w && ny >= 0 && ny < h && src[ny * w + nx]) v = 1;
+        }
+      }
+      out[y * w + x] = v;
+    }
+  }
+  return out;
+}
+
+function erode(src, w, h, r) {
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let v = 1;
+      for (let dy = -r; dy <= r && v; dy++) {
+        for (let dx = -r; dx <= r && v; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h || !src[ny * w + nx]) v = 0;
+        }
+      }
+      out[y * w + x] = v;
+    }
+  }
+  return out;
+}
+
+// Fill small gaps (like a neckline notch) without eating real edges.
+function closeSmallGaps(bin, w, h, r) {
+  return erode(dilate(bin, w, h, r), w, h, r);
+}
+
+const CUTOUT_CLOSE_RADIUS = 8; // fills small internal gaps/notches
+const CUTOUT_SHAVE_RADIUS = 2; // trims a thin ring off the outer edge to remove
+                                // jagged/torn-looking boundaries and background bleed
+
+function cleanupMask(mdata, mw, mh) {
+  let rawBin = new Uint8Array(mw * mh);
+  for (let i = 0; i < mdata.length; i++) rawBin[i] = mdata[i] > 128 ? 1 : 0;
+  const largest = largestComponent(rawBin, mw, mh);
+  const closed = closeSmallGaps(largest, mw, mh, CUTOUT_CLOSE_RADIUS);
+  const shaved = erode(closed, mw, mh, CUTOUT_SHAVE_RADIUS);
+  return shaved;
+}
+
 async function loadCutoutCache() {
   try {
     const raw = await readFile(OUTPUT_FILE, "utf-8");
@@ -337,10 +346,6 @@ async function generateCutout(imageUrl) {
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("cutout timeout")), 20000));
     const output = await Promise.race([segmenter(imageUrl), timeout]);
 
-    // Try every candidate garment label and keep whichever plausible one
-    // covers the most of the image — the model doesn't always label the
-    // same photo the same way (e.g. some dresses come back as "Dress",
-    // others as "Upper-clothes"), so trust coverage over a fixed guess.
     let best = null;
     for (const label of CUTOUT_CANDIDATE_LABELS) {
       const candidate = output.find((o) => o.label === label);
@@ -354,17 +359,16 @@ async function generateCutout(imageUrl) {
     }
     if (!best) return null;
 
-    // Bounding-box fill ratio: a clean garment mask should be mostly solid
-    // within its own bounding box. A low ratio means something is punching
-    // a hole through the middle of it (classic case: a hand resting on the
-    // hip exposes background between the fingers) — skip those rather than
-    // ship a visibly broken cutout.
-    const { mask, count } = best;
-    const mw = mask.width, mh = mask.height, mdata = mask.data;
+    const { mask } = best;
+    const mw = mask.width, mh = mask.height;
+    const cleanedBin = cleanupMask(mask.data, mw, mh);
+
+    let count = 0;
     let minX = mw, maxX = 0, minY = mh, maxY = 0;
     for (let y = 0; y < mh; y++) {
       for (let x = 0; x < mw; x++) {
-        if (mdata[y * mw + x] > 128) {
+        if (cleanedBin[y * mw + x]) {
+          count++;
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
@@ -372,12 +376,12 @@ async function generateCutout(imageUrl) {
         }
       }
     }
+    const coverage = count / (mw * mh);
+    if (coverage < CUTOUT_MIN_COVERAGE || coverage > CUTOUT_MAX_COVERAGE) return null;
     const bboxArea = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
     const fillRatio = count / bboxArea;
     if (fillRatio < CUTOUT_MIN_FILL_RATIO) return null;
 
-    // Decode the original photo at the SAME resolution the model saw, so
-    // mask pixels map 1:1 onto source pixels with no remapping error.
     const res = await fetch(imageUrl, { headers: { "User-Agent": "Mozilla/5.0 (Kashef sync bot)" } });
     if (!res.ok) return null;
     const buf = Buffer.from(await res.arrayBuffer());
@@ -390,7 +394,7 @@ async function generateCutout(imageUrl) {
     const out = Buffer.alloc(mw * mh * 4);
     for (let i = 0; i < mw * mh; i++) {
       const si = i * 4;
-      if (mdata[i] > 128) {
+      if (cleanedBin[i]) {
         out[si] = srcRgba[si];
         out[si + 1] = srcRgba[si + 1];
         out[si + 2] = srcRgba[si + 2];
@@ -424,9 +428,7 @@ async function mapProduct(sp, storeUrl, brandName) {
   const firstVariant = variants[0] || {};
   const inStock = variants.some((v) => v.available !== false);
   const onSale = variants.some(
-    (v) =>
-      v.compare_at_price &&
-      parseFloat(v.compare_at_price) > parseFloat(v.price)
+    (v) => v.compare_at_price && parseFloat(v.compare_at_price) > parseFloat(v.price)
   );
   const sizeOption = (sp.options || []).find((o) => /size/i.test(o.name));
   const colorOption = (sp.options || []).find((o) => /colou?r/i.test(o.name));
@@ -450,12 +452,7 @@ async function mapProduct(sp, storeUrl, brandName) {
     onSale,
     inStock,
     source: { type: "shopify", url: storeUrl },
-    lastSynced: new Date().toLocaleString("en-GB", {
-      day: "2-digit",
-      month: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
+    lastSynced: new Date().toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }),
   };
 }
 
@@ -465,10 +462,7 @@ function stripPlaceholderLogos(html) {
   for (const name of BRANDS_WITHOUT_REAL_LOGOS) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`(\\{name:"${escaped}"[^}]*?), photo:"[^"]*"(\\})`);
-    if (re.test(updated)) {
-      updated = updated.replace(re, "$1$2");
-      count++;
-    }
+    if (re.test(updated)) { updated = updated.replace(re, "$1$2"); count++; }
   }
   return { html: updated, count };
 }
@@ -497,12 +491,7 @@ async function main() {
             cutoutsReused++;
           } else if (cutoutBudget > 0) {
             const path = await generateCutout(p.image);
-            if (path) {
-              p.cutoutImage = path;
-              cutoutsGenerated++;
-            } else {
-              cutoutsSkipped++;
-            }
+            if (path) { p.cutoutImage = path; cutoutsGenerated++; } else { cutoutsSkipped++; }
             cutoutBudget--;
           }
         }
@@ -513,11 +502,7 @@ async function main() {
 
       allMapped.push(...mapped);
       const inStockCount = mapped.filter((p) => p.inStock).length;
-      summary.push(
-        `${store.brand}: ${mapped.length} products (${inStockCount} in stock, ${
-          mapped.length - inStockCount
-        } sold out)`
-      );
+      summary.push(`${store.brand}: ${mapped.length} products (${inStockCount} in stock, ${mapped.length - inStockCount} sold out)`);
     } catch (err) {
       summary.push(`${store.brand}: FAILED — ${err.message}`);
     }
@@ -551,9 +536,7 @@ async function main() {
       await writeFile(HTML_FILE, newHtml);
       bakedIntoHtml = true;
     } else {
-      console.warn(
-        `Warning: couldn't find the SYNCED_PRODUCTS markers in ${HTML_FILE} — skipped baking data into the HTML. synced-products.json was still written normally.`
-      );
+      console.warn(`Warning: couldn't find the SYNCED_PRODUCTS markers in ${HTML_FILE} — skipped baking data into the HTML. synced-products.json was still written normally.`);
     }
   } catch (err) {
     console.warn(`Warning: couldn't update ${HTML_FILE} (${err.message}). synced-products.json was still written normally.`);
@@ -562,9 +545,7 @@ async function main() {
   console.log("\n--- Kashef sync summary ---");
   summary.forEach((line) => console.log(line));
   console.log(`\nWrote ${deduped.length} total products to ${OUTPUT_FILE}`);
-  console.log(
-    `Cutouts — new: ${cutoutsGenerated}, reused from cache: ${cutoutsReused}, skipped (failed quality check): ${cutoutsSkipped}`
-  );
+  console.log(`Cutouts — new: ${cutoutsGenerated}, reused from cache: ${cutoutsReused}, skipped (failed quality check): ${cutoutsSkipped}`);
   if (bakedIntoHtml) {
     console.log(`Also baked ${deduped.length} products directly into ${HTML_FILE} — it now works standalone, no server needed.`);
   }
