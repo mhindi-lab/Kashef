@@ -318,7 +318,7 @@ function closeSmallGaps(bin, w, h, r) {
   return erode(dilate(bin, w, h, r), w, h, r);
 }
 
-const CUTOUT_CLOSE_RADIUS = 24; // fills gaps/notches, including longer structural
+const CUTOUT_CLOSE_RADIUS = 8; // fills gaps/notches, including longer structural
                                  // strips (bumped up from an earlier 8 that only
                                  // handled small local notches)
 const CUTOUT_SHAVE_RADIUS = 2; // trims a thin ring off the outer edge to remove
@@ -374,7 +374,7 @@ function convexHullArea(mask, w, h) {
 // underarm curve. Configurable via env for easy tuning without a code
 // change, since the right cutoff is still being calibrated against real
 // photos.
-const CUTOUT_MIN_SOLIDITY = process.env.CUTOUT_MIN_SOLIDITY ? parseFloat(process.env.CUTOUT_MIN_SOLIDITY) : 0.72;
+const CUTOUT_MIN_SOLIDITY = process.env.CUTOUT_MIN_SOLIDITY ? parseFloat(process.env.CUTOUT_MIN_SOLIDITY) : 0.9;
 
 async function loadCutoutCache() {
   try {
