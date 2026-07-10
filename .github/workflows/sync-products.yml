@@ -4,19 +4,21 @@
 # in your Kashef repo (create the .github/workflows/ folders if they
 # don't exist yet).
 #
-# WHAT IT DOES: once a day (and any time you trigger it manually), this
-# runs sync-products.mjs on GitHub's servers, which re-fetches all four
-# stores' live catalogs and regenerates synced-products.json. If prices,
-# stock, or sales changed, it commits the updated file straight to your
-# repo — so the live site (which auto-loads synced-products.json) stays
-# current with zero manual work after the first run.
+# WHAT IT DOES: runs sync-products.mjs on GitHub's servers, which
+# re-fetches all stores' live catalogs, regenerates
+# synced-products.json, and also generates "ghost mannequin" style
+# garment cutouts (product photo with the model removed) for eligible
+# Men's/Women's Fashion items. If anything changed, it commits the
+# updated files straight to your repo — so the live site (which
+# auto-loads synced-products.json) stays current with zero manual
+# work after the first run.
 #
 # ONE-TIME SETUP (~10 seconds):
-#   1. Commit this file + sync-products.mjs to your repo.
-#   2. Go to the "Actions" tab on GitHub.
-#   3. Click "Sync Kashef products" in the left sidebar.
-#   4. Click "Run workflow" once to confirm it works.
-# After that, it just runs itself every day.
+# 1. Commit this file + sync-products.mjs to your repo.
+# 2. Go to the "Actions" tab on GitHub.
+# 3. Click "Sync Kashef products" in the left sidebar.
+# 4. Click "Run workflow" once to confirm it works.
+# After that, it just runs itself every 6 hours.
 
 name: Sync Kashef products
 
@@ -25,7 +27,12 @@ on:
     # Runs every 6 hours (00:00, 06:00, 12:00, 18:00 UTC). Edit the cron
     # expression to change the cadence, e.g. "0 3 * * *" for once a day.
     - cron: "0 */6 * * *"
-  workflow_dispatch: {} # lets you click "Run workflow" manually any time
+  workflow_dispatch:
+    inputs:
+      cutout_limit:
+        description: "Max NEW garment cutouts to generate this run (blank = unlimited). Use a small number like 10 to test."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -42,13 +49,18 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install dependencies
+        run: npm install @xenova/transformers sharp
+
       - name: Run product sync
+        env:
+          CUTOUT_LIMIT: ${{ github.event.inputs.cutout_limit }}
         run: node sync-products.mjs
 
       - name: Commit updated catalog (if anything changed)
         run: |
           git config user.name "kashef-sync-bot"
           git config user.email "actions@github.com"
-          git add synced-products.json kashef_9.html
+          git add synced-products.json kashef_9.html cutouts
           git diff --cached --quiet && echo "No product changes today." || git commit -m "chore: sync store products [automated]"
           git push
