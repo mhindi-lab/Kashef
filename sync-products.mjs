@@ -258,7 +258,11 @@ const CUTOUT_MIN_COVERAGE = 0.03; // strict: mask must cover at least 3% of the 
 const CUTOUT_MAX_COVERAGE = 0.55; // ...and at most 55% (a bigger mask is probably wrong)
 const CUTOUT_MIN_FILL_RATIO = 0.68; // painted px / bounding-box area — catches big holes
 const CUTOUT_RELAXED_MIN_COVERAGE = 0.005; // best-effort mode: only reject near-empty masks
-const PROCESS_LIMIT = process.env.CUTOUT_LIMIT ? parseInt(process.env.CUTOUT_LIMIT, 10) : Infinity;
+// Products to run segmentation on per run. Finite by default so every run
+// finishes well inside GitHub's 6-hour job limit and COMMITS its progress;
+// the every-6-hours schedule then works through the whole catalog batch by
+// batch (decisions are cached, so processed products are never redone).
+const PROCESS_LIMIT = process.env.CUTOUT_LIMIT ? parseInt(process.env.CUTOUT_LIMIT, 10) : 200;
 const MAX_GALLERY_CHECK = 5; // how many gallery photos to scan for a person-free one
 const MAX_CUTOUT_SOURCES = 2; // how many photos to try strict cutouts on
 
@@ -288,10 +292,22 @@ async function getSegmenter() {
   return _segmenter;
 }
 
+// One segmentation per image per run: detectPerson and the strict/relaxed
+// cutout passes all reuse the same output instead of re-running the model
+// (which costs ~10s per pass on Actions hardware).
+const _segCache = new Map();
+const SEG_CACHE_MAX = 40;
 async function segmentImage(imageUrl, timeoutMs = 20000) {
+  if (_segCache.has(imageUrl)) return _segCache.get(imageUrl);
   const segmenter = await getSegmenter();
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("segmentation timeout")), timeoutMs));
-  return Promise.race([segmenter(imageUrl), timeout]);
+  const output = await Promise.race([segmenter(imageUrl), timeout]);
+  if (_segCache.size >= SEG_CACHE_MAX) {
+    const oldest = _segCache.keys().next().value;
+    _segCache.delete(oldest);
+  }
+  _segCache.set(imageUrl, output);
+  return output;
 }
 
 function maskCoverage(mask) {
@@ -821,3 +837,4 @@ main().catch((err) => {
   console.error("Sync failed:", err);
   process.exit(1);
 });
+// EOF
