@@ -1,4 +1,8 @@
 /**
+ * Copyright (c) 2026 Monzer (mhindi-lab). All rights reserved.
+ * Proprietary — see LICENSE. No permission to copy, reuse, or
+ * redistribute any part of this file.
+ * ---------------------------------------------------------------
  * Kashef — live store sync (server-side, no CORS issues)
  * ---------------------------------------------------------------
  * Fetches every store's public /products.json feed directly from
