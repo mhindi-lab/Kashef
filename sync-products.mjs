@@ -15,30 +15,23 @@
  * placeholder brand photo that isn't a real logo, falling back to
  * the honest colored-initials badge.
  *
- * MODEL-FREE IMAGES (site policy: never show a human model)
+ * MODEL-FREE CATALOG (site policy: never show a human figure)
  * ---------------------------------------------------------------
- * Every product's display image (p.image) is guaranteed to contain
- * no person. For each product, in order:
+ * Only products with at least one PRODUCT-ONLY photo (no person in
+ * it) are listed on the site. For each product, every photo in its
+ * gallery is checked with a local segmentation model
+ * (Xenova/segformer_b0_clothes): if a photo contains no face, hair,
+ * arms, or legs, it becomes the product's display image. If every
+ * photo contains a person, the product is HIDDEN from the site
+ * entirely (it stays hidden until the brand adds a product-only
+ * photo). Products with no photos at all remain listed with the
+ * colored category-icon tile (no human figure involved).
  *
- *   1. GALLERY SCAN — check the product's photo gallery (up to
- *      MAX_GALLERY_CHECK images) with the local segmentation model
- *      and pick the first photo with no person in it (no face,
- *      hair, arms, or legs detected). Most products have a
- *      flat-lay/back/detail shot, so this covers the majority.
- *   2. STRICT CUTOUT — if every photo has a person, generate a
- *      ghost-mannequin garment cutout (person removed, white
- *      background) that must pass all quality checks.
- *   3. BEST-EFFORT CUTOUT — if the strict cutout fails quality
- *      checks, accept the best cutout we can make anyway. A rough
- *      garment cutout beats an empty tile, and it never shows a
- *      person.
- *
- * p.image is OVERWRITTEN with the chosen safe image, so the site
- * (which renders p.image directly) needs no changes. The original
- * first photo is preserved in p.originalImage for caching, and
- * p.cutoutImage is still set when a cutout was used. Verdicts are
- * cached in synced-products.json via p.imagesHash, so unchanged
- * products are never re-checked on later runs.
+ * Verdicts are cached in scan-cache.json (committed by the
+ * workflow), keyed by product link + a hash of its photo list, so
+ * a product is only ever re-checked when its photos change.
+ * Products not yet checked (budget ran out) are NOT listed until a
+ * later run verifies them — unverified photos are never shown.
  *
  * USAGE
  *   node sync-products.mjs
@@ -47,20 +40,19 @@
  *   node -v
  *
  * ENV KNOBS
- *   CUTOUT_LIMIT        max products to run segmentation on this
- *                       run (blank = unlimited). Unprocessed
- *                       products keep their previous image until a
- *                       later run reaches them.
- *   CUTOUT_MIN_SOLIDITY strict-mode solidity cutoff (default 0.9)
+ *   CUTOUT_LIMIT  max products to scan with the model this run
+ *                 (default 200, so every run finishes well inside
+ *                 GitHub's 6h job limit and commits its progress;
+ *                 the every-6-hours schedule works through the
+ *                 catalog batch by batch).
  *
  * Edit the STORES list below to add/remove stores.
  * ---------------------------------------------------------------
  */
 
-import { writeFile, readFile, mkdir } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pipeline } from "@xenova/transformers";
-import sharp from "sharp";
 
 const STORES = [
   { brand: "Mzaco", url: "https://mzaco-eg.com" },
@@ -73,6 +65,7 @@ const STORES = [
 ];
 
 const OUTPUT_FILE = "synced-products.json";
+const SCAN_CACHE_FILE = "scan-cache.json";
 const PAGE_SIZE = 250; // Shopify's max per page
 
 const HTML_FILE = "kashef_9.html";
@@ -236,53 +229,17 @@ async function fetchAllProducts(storeUrl) {
 }
 
 // ---------------------------------------------------------------
-// MODEL-FREE IMAGE PIPELINE
-// The site policy is that no product photo may show a person. The
-// same local segmentation model (Xenova/segformer_b0_clothes) is
-// used for two jobs:
-//   • detectPerson(url) — does this photo contain a person?
-//     (checks coverage of Face / Hair / arms / legs labels)
-//   • generateCutout(url) — segment just the product out of a
-//     model photo onto a white background ("ghost mannequin").
-// Runs entirely locally/free via @xenova/transformers — no paid API.
-//
-// p.image IS overwritten with the chosen safe image (this is the
-// point: the site renders p.image directly, so overwriting it is
-// what guarantees no person ever appears). The original photo URL
-// is kept in p.originalImage, and p.imagesHash caches the decision
-// so unchanged products are never re-processed.
+// PERSON DETECTION (the whole model-free pipeline)
+// A photo is "product-only" when the segmentation model finds no
+// face, hair, arms, or legs in it. Runs entirely locally/free via
+// @xenova/transformers — no paid API.
 // ---------------------------------------------------------------
 
-const CUTOUT_DIR = "cutouts";
-const CUTOUT_MIN_COVERAGE = 0.03; // strict: mask must cover at least 3% of the image
-const CUTOUT_MAX_COVERAGE = 0.55; // ...and at most 55% (a bigger mask is probably wrong)
-const CUTOUT_MIN_FILL_RATIO = 0.68; // painted px / bounding-box area — catches big holes
-const CUTOUT_RELAXED_MIN_COVERAGE = 0.005; // best-effort mode: only reject near-empty masks
-// Products to run segmentation on per run. Finite by default so every run
-// finishes well inside GitHub's 6-hour job limit and COMMITS its progress;
-// the every-6-hours schedule then works through the whole catalog batch by
-// batch (decisions are cached, so processed products are never redone).
 const PROCESS_LIMIT = process.env.CUTOUT_LIMIT ? parseInt(process.env.CUTOUT_LIMIT, 10) : 200;
-const MAX_GALLERY_CHECK = 5; // how many gallery photos to scan for a person-free one
-const MAX_CUTOUT_SOURCES = 2; // how many photos to try strict cutouts on
+const MAX_GALLERY_CHECK = 12; // photos per product to check, cost cap
 
-// Person indicators among segformer_b0_clothes labels. If these
-// cover more than PERSON_MIN_COVERAGE of the image, a person (or
-// realistic mannequin — treated the same, to be safe) is present.
 const PERSON_LABELS = new Set(["Face", "Hair", "Left-arm", "Right-arm", "Left-leg", "Right-leg"]);
 const PERSON_MIN_COVERAGE = 0.005; // 0.5% of the image
-
-// Which segmentation labels count as "the product" per category,
-// so cutouts work for shoes/bags/accessories too, not just garments.
-const GARMENT_LABELS = ["Upper-clothes", "Dress", "Pants", "Skirt", "Scarf", "Hat"];
-const CUTOUT_LABELS_BY_CAT = {
-  "Men's Fashion": GARMENT_LABELS,
-  "Women's Fashion": GARMENT_LABELS,
-  "Shoes": ["Left-shoe", "Right-shoe"],
-  "Bags": ["Bag"],
-  "Accessories": ["Hat", "Scarf", "Sunglasses", "Belt", "Bag"],
-};
-const CUTOUT_LABELS_DEFAULT = [...new Set([...GARMENT_LABELS, "Left-shoe", "Right-shoe", "Bag", "Sunglasses", "Belt"])];
 
 let _segmenter = null;
 async function getSegmenter() {
@@ -292,22 +249,10 @@ async function getSegmenter() {
   return _segmenter;
 }
 
-// One segmentation per image per run: detectPerson and the strict/relaxed
-// cutout passes all reuse the same output instead of re-running the model
-// (which costs ~10s per pass on Actions hardware).
-const _segCache = new Map();
-const SEG_CACHE_MAX = 40;
 async function segmentImage(imageUrl, timeoutMs = 20000) {
-  if (_segCache.has(imageUrl)) return _segCache.get(imageUrl);
   const segmenter = await getSegmenter();
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("segmentation timeout")), timeoutMs));
-  const output = await Promise.race([segmenter(imageUrl), timeout]);
-  if (_segCache.size >= SEG_CACHE_MAX) {
-    const oldest = _segCache.keys().next().value;
-    _segCache.delete(oldest);
-  }
-  _segCache.set(imageUrl, output);
-  return output;
+  return Promise.race([segmenter(imageUrl), timeout]);
 }
 
 function maskCoverage(mask) {
@@ -335,328 +280,61 @@ async function detectPerson(imageUrl) {
   }
 }
 
-function imageSlug(imageUrl) {
-  return createHash("md5").update(imageUrl).digest("hex").slice(0, 16);
-}
-
 function imagesHash(urls) {
   return createHash("md5").update((urls || []).join("|")).digest("hex").slice(0, 16);
 }
 
-// ---- Mask cleanup helpers ----
-// Real photos reviewed after the first two live test runs showed the raw
-// segmentation mask leaves gaps in two different ways: (1) small local
-// notches (a neckline gap where the model missed a strip of collar), which
-// a modest morphological closing fixes fine, and (2) longer structural gaps
-// (a strip of visible torso between a loose sleeve and the body, running
-// most of a side seam) that need a much bigger closing radius to bridge.
-// We (a) use a generous closing radius, then (b) measure how "solid"
-// (convex) the resulting shape is; in STRICT mode anything too irregular
-// is rejected, while BEST-EFFORT mode ships it anyway (site policy: a
-// rough cutout beats showing a person or an empty tile).
-
-// Keep every connected component at least `keepRatio` the size of the
-// largest one (so a pair of shoes keeps both shoes), drop the noise.
-function mainComponents(bin, w, h, keepRatio = 0.25) {
-  const labels = new Int32Array(w * h).fill(-1);
-  const sizes = [];
-  let label = 0;
-  const stack = [];
-  for (let start = 0; start < w * h; start++) {
-    if (!bin[start] || labels[start] !== -1) continue;
-    let size = 0;
-    stack.length = 0;
-    stack.push(start);
-    labels[start] = label;
-    while (stack.length) {
-      const idx = stack.pop();
-      size++;
-      const x = idx % w;
-      const y = (idx / w) | 0;
-      if (x > 0 && bin[idx - 1] && labels[idx - 1] === -1) { labels[idx - 1] = label; stack.push(idx - 1); }
-      if (x < w - 1 && bin[idx + 1] && labels[idx + 1] === -1) { labels[idx + 1] = label; stack.push(idx + 1); }
-      if (y > 0 && bin[idx - w] && labels[idx - w] === -1) { labels[idx - w] = label; stack.push(idx - w); }
-      if (y < h - 1 && bin[idx + w] && labels[idx + w] === -1) { labels[idx + w] = label; stack.push(idx + w); }
-    }
-    sizes.push(size);
-    label++;
-  }
-  if (!sizes.length) return new Uint8Array(w * h);
-  const maxSize = Math.max(...sizes);
-  const keep = new Set();
-  sizes.forEach((s, l) => { if (s >= maxSize * keepRatio) keep.add(l); });
-  const out = new Uint8Array(w * h);
-  for (let i = 0; i < w * h; i++) out[i] = labels[i] !== -1 && keep.has(labels[i]) ? 1 : 0;
-  return out;
-}
-
-function dilate(src, w, h, r) {
-  const out = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let v = 0;
-      for (let dy = -r; dy <= r && !v; dy++) {
-        for (let dx = -r; dx <= r && !v; dx++) {
-          const nx = x + dx, ny = y + dy;
-          if (nx >= 0 && nx < w && ny >= 0 && ny < h && src[ny * w + nx]) v = 1;
-        }
-      }
-      out[y * w + x] = v;
-    }
-  }
-  return out;
-}
-
-function erode(src, w, h, r) {
-  const out = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let v = 1;
-      for (let dy = -r; dy <= r && v; dy++) {
-        for (let dx = -r; dx <= r && v; dx++) {
-          const nx = x + dx, ny = y + dy;
-          if (nx < 0 || nx >= w || ny < 0 || ny >= h || !src[ny * w + nx]) v = 0;
-        }
-      }
-      out[y * w + x] = v;
-    }
-  }
-  return out;
-}
-
-// Fill gaps (neckline notches, and longer side-seam strips) without eating
-// real edges too much.
-function closeSmallGaps(bin, w, h, r) {
-  return erode(dilate(bin, w, h, r), w, h, r);
-}
-
-const CUTOUT_CLOSE_RADIUS = 8; // fills gaps/notches, including longer structural strips
-const CUTOUT_SHAVE_RADIUS = 2; // trims a thin ring off the outer edge to remove
-// jagged/torn-looking boundaries and background bleed
-
-function cleanupMask(bin, mw, mh) {
-  const main = mainComponents(bin, mw, mh);
-  const closed = closeSmallGaps(main, mw, mh, CUTOUT_CLOSE_RADIUS);
-  const shaved = erode(closed, mw, mh, CUTOUT_SHAVE_RADIUS);
-  return shaved;
-}
-
-// Convex-hull area of a mask, computed on a subsampled point grid (fast and
-// close enough — we only need this for a solidity ratio, not exact geometry).
-function convexHullArea(mask, w, h) {
-  const pts = [];
-  const step = 2;
-  for (let y = 0; y < h; y += step) {
-    for (let x = 0; x < w; x += step) {
-      if (mask[y * w + x]) pts.push([x, y]);
-    }
-  }
-  if (pts.length < 3) return 0;
-  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  const lower = [];
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper = [];
-  for (let i = pts.length - 1; i >= 0; i--) {
-    const p = pts[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
-  let area = 0;
-  for (let i = 0; i < hull.length; i++) {
-    const [x1, y1] = hull[i];
-    const [x2, y2] = hull[(i + 1) % hull.length];
-    area += x1 * y2 - x2 * y1;
-  }
-  return Math.abs(area) / 2;
-}
-
-// Strict-mode solidity cutoff (mask area / hull area). Configurable via env
-// for easy tuning without a code change.
-const CUTOUT_MIN_SOLIDITY = process.env.CUTOUT_MIN_SOLIDITY ? parseFloat(process.env.CUTOUT_MIN_SOLIDITY) : 0.9;
-
-// Cache of previous cutouts (original photo URL -> cutout path) so we never
-// regenerate one we already have.
-async function loadCutoutCache() {
+// scan-cache.json: { [productLink]: { imagesHash, verdict, image } }
+//   verdict "visible" — `image` is a verified person-free photo
+//   verdict "hidden"  — every photo had a person; product not listed
+// Entries are reused only while the product's photo list is unchanged.
+async function loadScanCache() {
+  let cache = {};
   try {
-    const raw = await readFile(OUTPUT_FILE, "utf-8");
-    const prev = JSON.parse(raw);
-    const cache = new Map();
+    cache = JSON.parse(await readFile(SCAN_CACHE_FILE, "utf-8"));
+  } catch { /* first run */ }
+  // Seed from a previous synced-products.json that recorded verified
+  // person-free gallery picks (one-time migration from the old format).
+  try {
+    const prev = JSON.parse(await readFile(OUTPUT_FILE, "utf-8"));
     for (const p of prev) {
-      const key = p.originalImage || p.image;
-      if (key && p.cutoutImage) cache.set(key, p.cutoutImage);
+      if (p.link && !cache[p.link] && p.imageSource === "gallery" && p.imagesHash && p.image) {
+        cache[p.link] = { imagesHash: p.imagesHash, verdict: "visible", image: p.image };
+      }
     }
-    return cache;
-  } catch {
-    return new Map();
-  }
+  } catch { /* fine */ }
+  return cache;
 }
 
-// Cache of previous image decisions (product link -> chosen safe image),
-// valid as long as the product's photo gallery hasn't changed (imagesHash).
-async function loadSelectionCache() {
-  try {
-    const raw = await readFile(OUTPUT_FILE, "utf-8");
-    const prev = JSON.parse(raw);
-    const cache = new Map();
-    for (const p of prev) {
-      if (p.link && p.imagesHash && p.imageSource) {
-        cache.set(p.link, {
-          imagesHash: p.imagesHash,
-          image: p.image,
-          cutoutImage: p.cutoutImage || null,
-          imageSource: p.imageSource,
-        });
-      }
-    }
-    return cache;
-  } catch {
-    return new Map();
+// Decide whether a product may appear on the site, and with which photo.
+// Returns { status: "visible"|"hidden"|"pending", image }
+async function evaluateProduct(link, gallery, scanCache, budgetRef) {
+  if (!gallery.length) {
+    return { status: "visible", image: "" }; // icon tile — no human figure involved
   }
-}
-
-// Generate a product cutout from a photo. In strict mode all quality checks
-// apply and null is returned on failure. In relaxed (best-effort) mode we
-// ship the best mask we can find — the only hard requirement is that a
-// product mask exists at all and isn't practically empty.
-async function generateCutout(imageUrl, category, { relaxed = false } = {}) {
-  if (!imageUrl) return null;
-  try {
-    const output = await segmentImage(imageUrl);
-    const candidateLabels = CUTOUT_LABELS_BY_CAT[category] || CUTOUT_LABELS_DEFAULT;
-
-    // Union all product labels into one mask (so e.g. a pair of shoes, or
-    // a top + skirt outfit, stays complete).
-    let mw = 0, mh = 0;
-    let union = null;
-    for (const label of candidateLabels) {
-      const seg = output.find((o) => o.label === label);
-      if (!seg) continue;
-      const mdata = seg.mask.data;
-      if (!union) { mw = seg.mask.width; mh = seg.mask.height; union = new Uint8Array(mw * mh); }
-      for (let i = 0; i < mdata.length; i++) if (mdata[i] > 128) union[i] = 1;
-    }
-    if (!union) return null;
-
-    let rawCoverage = 0;
-    for (let i = 0; i < union.length; i++) rawCoverage += union[i];
-    rawCoverage /= union.length;
-    const minCoverage = relaxed ? CUTOUT_RELAXED_MIN_COVERAGE : CUTOUT_MIN_COVERAGE;
-    if (rawCoverage < minCoverage) return null;
-    if (!relaxed && rawCoverage > CUTOUT_MAX_COVERAGE) return null;
-
-    const cleanedBin = cleanupMask(union, mw, mh);
-
-    let count = 0;
-    let minX = mw, maxX = 0, minY = mh, maxY = 0;
-    for (let y = 0; y < mh; y++) {
-      for (let x = 0; x < mw; x++) {
-        if (cleanedBin[y * mw + x]) {
-          count++;
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
-      }
-    }
-    const coverage = count / (mw * mh);
-    if (coverage < minCoverage) return null;
-    if (!relaxed) {
-      if (coverage > CUTOUT_MAX_COVERAGE) return null;
-      const bboxArea = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
-      const fillRatio = count / bboxArea;
-      if (fillRatio < CUTOUT_MIN_FILL_RATIO) return null;
-      const hullArea = convexHullArea(cleanedBin, mw, mh);
-      const solidity = hullArea > 0 ? count / hullArea : 0;
-      console.log(`  Cutout candidate solidity=${solidity.toFixed(3)} fillRatio=${fillRatio.toFixed(3)} coverage=${coverage.toFixed(3)} for ${imageUrl}`);
-      if (solidity < CUTOUT_MIN_SOLIDITY) {
-        console.log(`  Rejected (solidity ${solidity.toFixed(3)} < ${CUTOUT_MIN_SOLIDITY}) — will retry in best-effort mode`);
-        return null;
-      }
-    }
-
-    const res = await fetch(imageUrl, { headers: { "User-Agent": "Mozilla/5.0 (Kashef sync bot)" } });
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    const { data: srcRgba } = await sharp(buf)
-      .resize(mw, mh, { fit: "fill" })
-      .ensureAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const out = Buffer.alloc(mw * mh * 4);
-    for (let i = 0; i < mw * mh; i++) {
-      const si = i * 4;
-      if (cleanedBin[i]) {
-        out[si] = srcRgba[si];
-        out[si + 1] = srcRgba[si + 1];
-        out[si + 2] = srcRgba[si + 2];
-        out[si + 3] = 255;
-      } else {
-        out[si] = 255;
-        out[si + 1] = 255;
-        out[si + 2] = 255;
-        out[si + 3] = 255;
-      }
-    }
-
-    await mkdir(CUTOUT_DIR, { recursive: true });
-    const outPath = `${CUTOUT_DIR}/${imageSlug(imageUrl)}.jpg`;
-    await sharp(out, { raw: { width: mw, height: mh, channels: 4 } })
-      .jpeg({ quality: 88 })
-      .toFile(outPath);
-
-    return outPath;
-  } catch (err) {
-    console.warn("Cutout generation failed for", imageUrl, err && err.message);
-    return null;
+  const hash = imagesHash(gallery);
+  const cached = scanCache[link];
+  if (cached && cached.imagesHash === hash) {
+    return cached.verdict === "visible"
+      ? { status: "visible", image: cached.image }
+      : { status: "hidden", image: "" };
   }
-}
-
-// Decide the model-free display image for one product.
-// Returns { image, cutoutImage, imageSource } where imageSource is one of:
-//   "gallery"        — a person-free photo straight from the store
-//   "cutout"         — strict-quality ghost-mannequin cutout
-//   "cutout-rough"   — best-effort cutout (quality checks relaxed)
-//   "none"           — nothing usable found (site shows the category icon)
-async function chooseSafeImage(gallery, category, cutoutCache) {
-  // 1. GALLERY SCAN — first photo with no person wins.
+  if (budgetRef.left <= 0) {
+    // Not checked yet this run and no valid cache: never show unverified
+    // photos — keep the product off the site until a later run checks it.
+    return { status: "pending", image: "" };
+  }
+  budgetRef.left--;
   for (const url of gallery.slice(0, MAX_GALLERY_CHECK)) {
     const hasPerson = await detectPerson(url);
     if (hasPerson === false) {
-      return { image: url, cutoutImage: null, imageSource: "gallery" };
+      scanCache[link] = { imagesHash: hash, verdict: "visible", image: url };
+      return { status: "visible", image: url };
     }
     // true or null (couldn't verify) → keep looking; never show unverified.
   }
-
-  // 2. STRICT CUTOUT — reuse a cached one if we have it.
-  for (const url of gallery.slice(0, MAX_CUTOUT_SOURCES)) {
-    if (cutoutCache.has(url)) {
-      const path = cutoutCache.get(url);
-      return { image: path, cutoutImage: path, imageSource: "cutout" };
-    }
-  }
-  for (const url of gallery.slice(0, MAX_CUTOUT_SOURCES)) {
-    const path = await generateCutout(url, category, { relaxed: false });
-    if (path) return { image: path, cutoutImage: path, imageSource: "cutout" };
-  }
-
-  // 3. BEST-EFFORT CUTOUT — a rough cutout beats an empty tile, and it
-  //    never shows a person.
-  for (const url of gallery.slice(0, MAX_CUTOUT_SOURCES)) {
-    const path = await generateCutout(url, category, { relaxed: true });
-    if (path) return { image: path, cutoutImage: path, imageSource: "cutout-rough" };
-  }
-
-  // Nothing usable — fall back to the category icon tile rather than ever
-  // showing a person. (Expected to be extremely rare: it means every photo
-  // had a person AND segmentation found no product mask in any of them.)
-  return { image: "", cutoutImage: null, imageSource: "none" };
+  scanCache[link] = { imagesHash: hash, verdict: "hidden", image: "" };
+  return { status: "hidden", image: "" };
 }
 
 async function mapProduct(sp, storeUrl, brandName) {
@@ -684,10 +362,7 @@ async function mapProduct(sp, storeUrl, brandName) {
     c1: cat.c1,
     c2: cat.c2,
     platform: "website",
-    image: gallery[0] || "",
-    originalImage: gallery[0] || "",
-    imagesHash: imagesHash(gallery),
-    imageSource: "unprocessed",
+    image: "", // set after the person-free check
     link: `${storeUrl}/products/${sp.handle}`,
     desc: stripHtml(sp.body_html).slice(0, 140),
     sizes: sizeOption ? [...new Set(sizeOption.values)] : ["One Size"],
@@ -712,12 +387,11 @@ function stripPlaceholderLogos(html) {
 }
 
 async function main() {
-  const allMapped = [];
+  const visible = [];
   const summary = [];
-  const cutoutCache = await loadCutoutCache();
-  const selectionCache = await loadSelectionCache();
-  let budget = PROCESS_LIMIT; // products that may run segmentation this run
-  const stats = { gallery: 0, cutout: 0, cutoutRough: 0, none: 0, cached: 0, deferred: 0 };
+  const scanCache = await loadScanCache();
+  const budgetRef = { left: PROCESS_LIMIT };
+  const stats = { visible: 0, hidden: 0, pending: 0, noPhoto: 0, fromCache: 0 };
 
   for (const store of STORES) {
     const storeUrl = store.url.replace(/\/$/, "");
@@ -726,69 +400,44 @@ async function main() {
       const mappedPairs = await Promise.all(products.map((sp) => mapProduct(sp, storeUrl, store.brand)));
 
       let _progress = 0;
+      let storeVisible = 0;
       for (const { product: p, gallery } of mappedPairs) {
         _progress++;
-
-        if (!gallery.length) {
-          p.image = "";
-          p.imageSource = "none";
-          stats.none++;
+        const hadCache = scanCache[p.link] && scanCache[p.link].imagesHash === imagesHash(gallery);
+        const res = await evaluateProduct(p.link, gallery, scanCache, budgetRef);
+        if (res.status === "visible") {
+          p.image = res.image;
+          visible.push(p);
+          storeVisible++;
+          stats.visible++;
+          if (!gallery.length) stats.noPhoto++;
+          if (hadCache) stats.fromCache++;
+        } else if (res.status === "hidden") {
+          stats.hidden++;
+          if (hadCache) stats.fromCache++;
         } else {
-          const cached = selectionCache.get(p.link);
-          if (cached && cached.imagesHash === p.imagesHash && cached.imageSource !== "unprocessed" && cached.imageSource !== "none") {
-            // Same photos as last run — reuse the previous safe choice.
-            p.image = cached.image;
-            if (cached.cutoutImage) p.cutoutImage = cached.cutoutImage;
-            p.imageSource = cached.imageSource;
-            stats.cached++;
-          } else if (budget > 0) {
-            budget--;
-            const choice = await chooseSafeImage(gallery, p.cat, cutoutCache);
-            p.image = choice.image;
-            if (choice.cutoutImage) p.cutoutImage = choice.cutoutImage;
-            p.imageSource = choice.imageSource;
-            if (choice.imageSource === "gallery") stats.gallery++;
-            else if (choice.imageSource === "cutout") stats.cutout++;
-            else if (choice.imageSource === "cutout-rough") stats.cutoutRough++;
-            else stats.none++;
-          } else {
-            // Out of budget this run. NEVER show an unverified photo:
-            // reuse any previous safe image, else show the icon tile until
-            // a later run (they run every 6 hours) processes this product.
-            if (cached && cached.image && cached.imageSource !== "unprocessed" && cached.imageSource !== "none") {
-              p.image = cached.image;
-              if (cached.cutoutImage) p.cutoutImage = cached.cutoutImage;
-              p.imageSource = cached.imageSource;
-            } else {
-              p.image = "";
-              p.imageSource = "unprocessed";
-            }
-            stats.deferred++;
-          }
+          stats.pending++;
         }
-
         if (_progress % 25 === 0 || _progress === mappedPairs.length) {
-          console.log(`  Safe images: ${_progress}/${mappedPairs.length} for ${store.brand}`);
+          console.log(`  Person-free scan: ${_progress}/${mappedPairs.length} for ${store.brand} (${storeVisible} listed)`);
         }
       }
 
-      const mapped = mappedPairs.map((mp) => mp.product);
-      allMapped.push(...mapped);
-      const inStockCount = mapped.filter((p) => p.inStock).length;
-      summary.push(`${store.brand}: ${mapped.length} products (${inStockCount} in stock, ${mapped.length - inStockCount} sold out)`);
+      summary.push(`${store.brand}: ${mappedPairs.length} products, ${storeVisible} listed (person-free)`);
     } catch (err) {
       summary.push(`${store.brand}: FAILED — ${err.message}`);
     }
   }
 
   const seen = new Set();
-  const deduped = allMapped.filter((p) => {
+  const deduped = visible.filter((p) => {
     if (seen.has(p.link)) return false;
     seen.add(p.link);
     return true;
   });
 
   await writeFile(OUTPUT_FILE, JSON.stringify(deduped, null, 2));
+  await writeFile(SCAN_CACHE_FILE, JSON.stringify(scanCache, null, 2));
 
   let bakedIntoHtml = false;
   let logosFixed = 0;
@@ -817,14 +466,12 @@ async function main() {
 
   console.log("\n--- Kashef sync summary ---");
   summary.forEach((line) => console.log(line));
-  console.log(`\nWrote ${deduped.length} total products to ${OUTPUT_FILE}`);
-  console.log("Model-free images —");
-  console.log(`  person-free gallery photo: ${stats.gallery}`);
-  console.log(`  ghost-mannequin cutout:    ${stats.cutout}`);
-  console.log(`  best-effort cutout:        ${stats.cutoutRough}`);
-  console.log(`  reused from cache:         ${stats.cached}`);
-  console.log(`  deferred to a later run:   ${stats.deferred}`);
-  console.log(`  no usable image (icon):    ${stats.none}`);
+  console.log(`\nListed ${deduped.length} person-free products in ${OUTPUT_FILE}`);
+  console.log("Model-free catalog —");
+  console.log(`  listed (person-free photo or no photo): ${stats.visible} (${stats.noPhoto} without photos)`);
+  console.log(`  hidden (person in every photo):         ${stats.hidden}`);
+  console.log(`  pending (awaiting a later run):         ${stats.pending}`);
+  console.log(`  decisions reused from cache:            ${stats.fromCache}`);
   if (bakedIntoHtml) {
     console.log(`Also baked ${deduped.length} products directly into ${HTML_FILE} — it now works standalone, no server needed.`);
   }
@@ -837,4 +484,3 @@ main().catch((err) => {
   console.error("Sync failed:", err);
   process.exit(1);
 });
-// EOF
