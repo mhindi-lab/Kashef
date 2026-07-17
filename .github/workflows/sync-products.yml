@@ -5,13 +5,13 @@
 # don't exist yet).
 #
 # WHAT IT DOES: runs sync-products.mjs on GitHub's servers, which
-# re-fetches all stores' live catalogs, regenerates
-# synced-products.json, and also generates "ghost mannequin" style
-# garment cutouts (product photo with the model removed) for eligible
-# Men's/Women's Fashion items. If anything changed, it commits the
-# updated files straight to your repo — so the live site (which
-# auto-loads synced-products.json) stays current with zero manual
-# work after the first run.
+# re-fetches all stores' live catalogs and lists ONLY products that
+# have a verified person-free (product-only) photo — site policy is
+# that no human figure ever appears on Kashef. Products whose photos
+# all contain a person stay hidden until the brand adds a
+# product-only shot. Scan verdicts are cached in scan-cache.json so
+# each product is only re-checked when its photos change. If anything
+# changed, the run commits the updated files straight to your repo.
 #
 # ONE-TIME SETUP (~10 seconds):
 # 1. Commit this file + sync-products.mjs to your repo.
@@ -30,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       cutout_limit:
-        description: "Max NEW garment cutouts to generate this run (blank = unlimited). Use a small number like 10 to test."
+        description: "Max products to scan with the model this run (blank = 200). Use a small number like 10 to test."
         required: false
         default: ""
 
@@ -50,7 +50,7 @@ jobs:
           node-version: "20"
 
       - name: Install dependencies
-        run: npm install @xenova/transformers sharp
+        run: npm install @xenova/transformers
 
       - name: Run product sync
         env:
@@ -61,6 +61,7 @@ jobs:
         run: |
           git config user.name "kashef-sync-bot"
           git config user.email "actions@github.com"
-          git add synced-products.json kashef_9.html cutouts
+          rm -rf cutouts
+          git add -A -- synced-products.json kashef_9.html scan-cache.json cutouts
           git diff --cached --quiet && echo "No product changes today." || git commit -m "chore: sync store products [automated]"
           git push
