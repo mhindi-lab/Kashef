@@ -34,6 +34,9 @@ const STORES = [
   { brand: "Be-Indie", url: "https://be-indie.com" },
   { brand: "TruCult", url: "https://trucult.co" },
   { brand: "Marsy", url: "https://marsy.shop" },
+  { brand: "Lost Society", url: "https://lost-societyy.myshopify.com" },
+  { brand: "Taif", url: "https://taifcai.com" },
+  { brand: "Autentico", url: "https://autenticoofficial.com" },
 ];
 
 const OUTPUT_FILE = "synced-products.json";
