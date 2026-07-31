@@ -21,11 +21,13 @@
  * ---------------------------------------------------------------
  */
 
-import { writeFile, readFile, mkdir } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { writeFile as __fsWriteFile, readFile, mkdir } from "node:fs/promises";
+import{ createHash } from "node:crypto";
 import { pipeline } from "@xenova/transformers";
 import sharp from "sharp";
-
+async function writeFile(path, data) { if (path === HTML_FILE && typeof data === "string") { data = ensureBrandEntries(data); } return __fsWriteFile(path, data); }
+const BRAND_DIRECTORY = [ {name:"Lost Society", cat:"Men's Fashion", desc:"Egyptian streetwear label — graphic tees and everyday staples.", init:"LS", c1:"#3B434C", c2:"#20262D", link:"https://lost-societyy.myshopify.com/", photo:"https://lost-societyy.myshopify.com/cdn/shop/files/lost_logo.png"}, {name:"Taif", cat:"Men's Fashion", desc:"Cairo fashion label — shirts, tailoring and seasonal collections for men and women.", init:"TF", c1:"#3B434C", c2:"#20262D", link:"https://taifcai.com/", photo:"https://taifcai.com/cdn/shop/files/6X3_blk.png"}, {name:"Autentico", cat:"Men's Fashion", desc:"Made-in-Egypt streetwear label — essentials for men and women.", init:"AU", c1:"#3B434C", c2:"#20262D", link:"https://autenticoofficial.com/"} ];
+function ensureBrandEntries(html) { const marker = "const BRANDS = ["; const at = html.indexOf(marker); if (at === -1) return html; const insertAt = at + marker.length; let inject = ""; for (const b of BRAND_DIRECTORY) { if (html.includes('{name:"' + b.name + '"')) continue; const photo = b.photo ? ', photo:"' + b.photo + '"' : ""; inject += '{name:"' + b.name + '", cat:"' + b.cat + '", desc:"' + b.desc + '", init:"' + b.init + '", c1:"' + b.c1 + '", c2:"' + b.c2 + '", link:"' + b.link + '"' + photo + '},'; } return inject ? html.slice(0, insertAt) + inject + html.slice(insertAt) : html; }
 const STORES = [
   { brand: "Mzaco", url: "https://mzaco-eg.com" },
   { brand: "27", url: "https://twentysevenegy.myshopify.com" },
